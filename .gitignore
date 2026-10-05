@@ -1,0 +1,14 @@
+node_modules/
+dist/
+
+# Secrets — never commit these
+.env
+extractor.yaml
+
+# State / runtime files
+*.state.json
+*.log
+*.tmp
+
+# macOS
+.DS_Store

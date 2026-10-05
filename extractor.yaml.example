@@ -1,0 +1,42 @@
+# Gap 7: YAML config — alternative to .env
+# Copy to extractor.yaml (auto-discovered) or specify with EXTRACTOR_CONFIG=path/to/file.yaml
+# Values here take priority over .env
+
+github:
+  pat: ghp_xxxxxxxxxxxxxxxxxxxx
+
+concurrency:
+  repos: 3      # parallel repos
+  files: 10     # parallel files per repo
+
+adapters:
+  # Cloudflare R2
+  r2:
+    accountId: your-account-id
+    accessKeyId: your-key-id
+    secretAccessKey: your-secret
+    bucket: github-backup
+
+  # AWS S3
+  # s3:
+  #   region: us-east-1
+  #   accessKeyId: AKIA...
+  #   secretAccessKey: ...
+  #   bucket: github-backup
+
+  # Google Drive (service account)
+  # gdrive:
+  #   clientEmail: sa@project.iam.gserviceaccount.com
+  #   privateKey: "-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----"
+  #   rootFolderId: 1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74
+
+  # GitHub target repo
+  # githubTarget:
+  #   owner: myorg
+  #   repo: code-backup
+  #   branch: main
+
+  # Azure Blob
+  # azure:
+  #   connectionString: "DefaultEndpointsProtocol=https;AccountName=..."
+  #   container: github-backup
