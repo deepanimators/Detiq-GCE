@@ -562,6 +562,10 @@ export default function Home() {
               ? 'Extracting...'
               : `Start Extraction${countAdapters() > 1 ? ` → ${countAdapters()} targets` : ''}${metadataEnabled ? ' + metadata' : ''}`}
           </Button>
+          <p className="text-[11px] text-zinc-400 px-1">
+            Configuration is saved locally in this browser and restored after refresh. Clear this site&apos;s
+            storage if you are using a shared device.
+          </p>
         </div>
 
         {/* ── Right: live log ────────────────────────────────────────────── */}
