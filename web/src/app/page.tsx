@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState, useRef } from 'react';
+import { ClipboardCopy, Download, Save, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -61,6 +62,8 @@ const METADATA_TYPES = [
 ];
 
 const FORM_STORAGE_KEY = 'detiq-gce-form-v1';
+
+type PersistedFormState = Record<string, unknown>;
 
 // ── Shared UI components ──────────────────────────────────────────────────────
 
@@ -147,6 +150,80 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   );
 }
 
+function canUseLocalStorage(): boolean {
+  try {
+    const key = '__detiq_storage_probe__';
+    window.localStorage.setItem(key, '1');
+    window.localStorage.removeItem(key);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function summarizeActualError(logs: string[], currentRun: RunRecord | null): string | null {
+  const candidates = [
+    currentRun?.errorMessage,
+    ...logs.filter((log) =>
+      log.startsWith('ERROR') ||
+      log.startsWith('[error]') ||
+      log.startsWith('[warn]') ||
+      /failed|error|does not exist|forbidden|denied|unauthorized/i.test(log)
+    ),
+  ].filter((value): value is string => Boolean(value?.trim()));
+
+  if (!candidates.length) return null;
+
+  const counts = new Map<string, number>();
+  for (const candidate of candidates) {
+    const normalized = normalizeLogError(candidate);
+    counts.set(normalized, (counts.get(normalized) ?? 0) + 1);
+  }
+
+  const [message, count] = [...counts.entries()].sort((a, b) => b[1] - a[1])[0];
+  return count > 1 ? `${message} Seen ${count} times.` : message;
+}
+
+function normalizeLogError(log: string): string {
+  const afterDash = log.match(/—\s*(.+)$/)?.[1];
+  const afterError = log.match(/^ERROR:\s*(.+)$/)?.[1];
+  const afterPreflight = log.match(/^\[preflight failed\]\s*(.+)$/)?.[1];
+  return (afterDash ?? afterError ?? afterPreflight ?? log)
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function buildLogExport(args: {
+  logs: string[];
+  currentRun: RunRecord | null;
+  actualError: string | null;
+}): string {
+  const header = [
+    'Detiq GCE run log',
+    `Exported at: ${new Date().toISOString()}`,
+    args.currentRun ? `Run ID: ${args.currentRun.id}` : null,
+    args.currentRun ? `Status: ${args.currentRun.status}` : null,
+    args.actualError ? `Actual error: ${args.actualError}` : null,
+  ].filter(Boolean);
+
+  return `${header.join('\n')}\n\n${args.logs.join('\n')}\n`;
+}
+
+function fallbackCopyText(text: string): boolean {
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  textarea.setAttribute('readonly', 'true');
+  textarea.style.position = 'fixed';
+  textarea.style.left = '-9999px';
+  document.body.appendChild(textarea);
+  textarea.select();
+  try {
+    return document.execCommand('copy');
+  } finally {
+    document.body.removeChild(textarea);
+  }
+}
+
 // ── Main ─────────────────────────────────────────────────────────────────────
 
 export default function Home() {
@@ -216,10 +293,21 @@ export default function Home() {
   const [summary, setSummary] = useState<Summary | null>(null);
   const [currentRun, setCurrentRun] = useState<RunRecord | null>(null);
   const [formHydrated, setFormHydrated] = useState(false);
+  const [storageAvailable, setStorageAvailable] = useState(true);
+  const [credentialSaveStatus, setCredentialSaveStatus] = useState('');
+  const [logActionStatus, setLogActionStatus] = useState('');
   const logsEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     try {
+      if (!canUseLocalStorage()) {
+        queueMicrotask(() => {
+          setStorageAvailable(false);
+          setCredentialSaveStatus('Browser storage is unavailable in this mode.');
+        });
+        return;
+      }
+
       const saved = localStorage.getItem(FORM_STORAGE_KEY);
       if (saved) {
         const state = JSON.parse(saved) as Record<string, unknown>;
@@ -277,32 +365,25 @@ export default function Home() {
             setMetadataTypes(new Set(metadataTypeValues));
           });
         }
+        queueMicrotask(() => {
+          setCredentialSaveStatus('Saved credentials restored from this browser.');
+        });
       }
     } catch {
-      localStorage.removeItem(FORM_STORAGE_KEY);
+      try {
+        localStorage.removeItem(FORM_STORAGE_KEY);
+      } catch {
+        queueMicrotask(() => {
+          setStorageAvailable(false);
+        });
+      }
+      queueMicrotask(() => {
+        setCredentialSaveStatus('Saved credentials were unreadable and were cleared.');
+      });
     } finally {
       setFormHydrated(true);
     }
   }, []);
-
-  useEffect(() => {
-    if (!formHydrated) return;
-    localStorage.setItem(FORM_STORAGE_KEY, JSON.stringify({
-      pat, targetType, targetName, visibility, skipForks, skipArchived, dryRun,
-      matchRegex, topics, maxFileSizeKb, useDefaultExcludes, extraExcludes,
-      repoConcurrency, fileConcurrency, metadataEnabled, metadataTypes: [...metadataTypes],
-      r2On, s3On, gdriveOn, ghOn, azureOn, r2AccountId, r2AccessKey, r2SecretKey,
-      r2Bucket, s3Region, s3AccessKey, s3SecretKey, s3Bucket, gdriveEmail, gdriveKey,
-      gdriveFolderId, ghOwner, ghRepo, ghBranch, ghPat, azureConn, azureContainer,
-    }));
-  }, [
-    formHydrated, pat, targetType, targetName, visibility, skipForks, skipArchived, dryRun,
-    matchRegex, topics, maxFileSizeKb, useDefaultExcludes, extraExcludes,
-    repoConcurrency, fileConcurrency, metadataEnabled, metadataTypes, r2On, s3On,
-    gdriveOn, ghOn, azureOn, r2AccountId, r2AccessKey, r2SecretKey, r2Bucket,
-    s3Region, s3AccessKey, s3SecretKey, s3Bucket, gdriveEmail, gdriveKey,
-    gdriveFolderId, ghOwner, ghRepo, ghBranch, ghPat, azureConn, azureContainer,
-  ]);
 
   function addLog(msg: string) {
     setLogs((prev) => {
@@ -336,6 +417,46 @@ export default function Home() {
       if (next.has(id)) next.delete(id); else next.add(id);
       return next;
     });
+  }
+
+  function buildPersistedFormState(): PersistedFormState {
+    return {
+      pat, targetType, targetName, visibility, skipForks, skipArchived, dryRun,
+      matchRegex, topics, maxFileSizeKb, useDefaultExcludes, extraExcludes,
+      repoConcurrency, fileConcurrency, metadataEnabled, metadataTypes: [...metadataTypes],
+      r2On, s3On, gdriveOn, ghOn, azureOn, r2AccountId, r2AccessKey, r2SecretKey,
+      r2Bucket, s3Region, s3AccessKey, s3SecretKey, s3Bucket, gdriveEmail, gdriveKey,
+      gdriveFolderId, ghOwner, ghRepo, ghBranch, ghPat, azureConn, azureContainer,
+      savedAt: new Date().toISOString(),
+    };
+  }
+
+  function saveCredentials() {
+    if (!canUseLocalStorage()) {
+      setStorageAvailable(false);
+      setCredentialSaveStatus('Browser storage is unavailable in this mode.');
+      return;
+    }
+
+    try {
+      localStorage.setItem(FORM_STORAGE_KEY, JSON.stringify(buildPersistedFormState()));
+      setStorageAvailable(true);
+      setCredentialSaveStatus('Credentials saved in this browser.');
+    } catch {
+      setStorageAvailable(false);
+      setCredentialSaveStatus('Unable to save credentials. Browser storage may be blocked or full.');
+    }
+  }
+
+  function clearSavedCredentials() {
+    try {
+      localStorage.removeItem(FORM_STORAGE_KEY);
+      setCredentialSaveStatus('Saved credentials cleared from this browser.');
+      setStorageAvailable(true);
+    } catch {
+      setStorageAvailable(false);
+      setCredentialSaveStatus('Unable to clear credentials because browser storage is blocked.');
+    }
   }
 
   async function startExtraction() {
@@ -453,7 +574,48 @@ export default function Home() {
     return ['preflight_failed', 'completed', 'partial', 'failed', 'cancelled'].includes(status);
   }
 
+  async function copyLogs() {
+    const actualError = summarizeActualError(logs, currentRun);
+    const logExport = buildLogExport({ logs, currentRun, actualError });
+    if (!logs.length) {
+      setLogActionStatus('No logs to copy yet.');
+      return;
+    }
+
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(logExport);
+      } else if (!fallbackCopyText(logExport)) {
+        throw new Error('clipboard unavailable');
+      }
+      setLogActionStatus('Logs copied.');
+    } catch {
+      setLogActionStatus('Unable to copy logs in this browser.');
+    }
+  }
+
+  function downloadLogs() {
+    const actualError = summarizeActualError(logs, currentRun);
+    const logExport = buildLogExport({ logs, currentRun, actualError });
+    if (!logs.length) {
+      setLogActionStatus('No logs to download yet.');
+      return;
+    }
+
+    const blob = new Blob([logExport], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `detiq-gce-${currentRun?.id ?? 'run'}-${new Date().toISOString().replace(/[:.]/g, '-')}.log`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    document.body.removeChild(anchor);
+    URL.revokeObjectURL(url);
+    setLogActionStatus('Log file downloaded.');
+  }
+
   const canRun = pat && targetName && (dryRun || countAdapters() > 0);
+  const actualError = summarizeActualError(logs, currentRun);
 
   return (
     <div className="min-h-screen bg-zinc-50 dark:bg-zinc-950 font-sans">
@@ -635,17 +797,38 @@ export default function Home() {
               ? 'Run active...'
               : `Create Backup Run${countAdapters() > 1 ? ` → ${countAdapters()} targets` : ''}${metadataEnabled ? ' + metadata' : ''}`}
           </Button>
+          <div className="grid grid-cols-2 gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={saveCredentials}
+              disabled={!formHydrated || !storageAvailable}
+              className="h-9"
+            >
+              <Save data-icon="inline-start" />
+              Save credentials
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              onClick={clearSavedCredentials}
+              disabled={!formHydrated}
+              className="h-9 text-zinc-500 hover:text-red-600"
+            >
+              <Trash2 data-icon="inline-start" />
+              Clear saved
+            </Button>
+          </div>
           <p className="text-[11px] text-zinc-400 px-1">
-            Configuration is saved locally in this browser and restored after refresh. Clear this site&apos;s
-            storage if you are using a shared device.
+            {credentialSaveStatus || 'Use Save credentials to remember this setup in the current browser.'}
           </p>
         </div>
 
         {/* ── Right: live log ────────────────────────────────────────────── */}
         <div className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-800 flex flex-col sticky top-20" style={{ height: 'calc(100vh - 7rem)' }}>
-          <div className="flex items-center justify-between px-4 py-3 border-b border-zinc-100 dark:border-zinc-800 flex-shrink-0">
+          <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-3 border-b border-zinc-100 dark:border-zinc-800 flex-shrink-0">
             <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-50">Live Log</h2>
-            <div className="flex items-center gap-3">
+            <div className="flex flex-wrap items-center justify-end gap-2">
               {currentRun && (
                 <span className="text-xs text-zinc-400 font-mono">{currentRun.id.slice(0, 8)}</span>
               )}
@@ -658,12 +841,37 @@ export default function Home() {
               {running && currentRun && (
                 <button onClick={cancelRun} className="text-xs text-red-500 hover:text-red-700">Cancel</button>
               )}
+              {logs.length > 0 && (
+                <>
+                  <Button type="button" size="xs" variant="outline" onClick={copyLogs}>
+                    <ClipboardCopy data-icon="inline-start" />
+                    Copy
+                  </Button>
+                  <Button type="button" size="xs" variant="outline" onClick={downloadLogs}>
+                    <Download data-icon="inline-start" />
+                    Download
+                  </Button>
+                </>
+              )}
               {!running && logs.length > 0 && (
                 <button onClick={() => { setLogs([]); setSummary(null); setCurrentRun(null); }}
                   className="text-xs text-zinc-400 hover:text-zinc-600">Clear</button>
               )}
             </div>
           </div>
+
+          {(actualError || logActionStatus) && (
+            <div className="border-b border-zinc-100 dark:border-zinc-800 px-4 py-3 flex-shrink-0 space-y-1 bg-zinc-50 dark:bg-zinc-900">
+              {actualError && (
+                <p className="text-xs text-red-600 dark:text-red-400 break-words">
+                  <span className="font-semibold">Actual error:</span> {actualError}
+                </p>
+              )}
+              {logActionStatus && (
+                <p className="text-xs text-zinc-500 dark:text-zinc-400">{logActionStatus}</p>
+              )}
+            </div>
+          )}
 
           <div className="flex-1 overflow-y-auto p-4 font-mono text-xs text-zinc-600 dark:text-zinc-400 space-y-0.5 min-h-0">
             {logs.length === 0 && !running && (
