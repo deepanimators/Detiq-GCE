@@ -183,6 +183,9 @@ For orgs with 50+ repos: use `--incremental` after first run, or use `--clone-mo
 ## Docs
 
 - [Architecture](docs/ARCHITECTURE.md)
+- [Target Architecture](docs/TARGET_ARCHITECTURE.md)
 - [Adapters](docs/ADAPTERS.md)
 - [Investigation Log](docs/INVESTIGATION.md)
 - [Competitive Analysis](docs/COMPETITIVE_ANALYSIS.md)
+- [Platform Maturity Roadmap](docs/PLATFORM_MATURITY_ROADMAP.md)
+- [Operations Runbook](docs/OPERATIONS_RUNBOOK.md)

@@ -225,8 +225,12 @@ export default function Home() {
         setString('ghPat', setGhPat);
         setString('azureConn', setAzureConn);
         setString('azureContainer', setAzureContainer);
-        if (state.targetType === 'user' || state.targetType === 'org') setTargetType(state.targetType);
-        if (state.visibility === 'all' || state.visibility === 'public' || state.visibility === 'private') setVisibility(state.visibility);
+        setString('targetType', (value) => {
+          if (value === 'user' || value === 'org') setTargetType(value);
+        });
+        setString('visibility', (value) => {
+          if (value === 'all' || value === 'public' || value === 'private') setVisibility(value);
+        });
         setBoolean('skipForks', setSkipForks);
         setBoolean('skipArchived', setSkipArchived);
         setBoolean('dryRun', setDryRun);
@@ -238,7 +242,10 @@ export default function Home() {
         setBoolean('ghOn', setGhOn);
         setBoolean('azureOn', setAzureOn);
         if (Array.isArray(state.metadataTypes)) {
-          setMetadataTypes(new Set(state.metadataTypes.filter((v): v is string => typeof v === 'string')));
+          const metadataTypeValues = state.metadataTypes.filter((v): v is string => typeof v === 'string');
+          queueMicrotask(() => {
+            setMetadataTypes(new Set(metadataTypeValues));
+          });
         }
       }
     } catch {
