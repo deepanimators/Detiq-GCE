@@ -4,6 +4,29 @@ import pLimit from 'p-limit';
 import type { StorageAdapter } from '@/lib/adapters/base';
 import { withRetry } from '@/lib/retry';
 
+type IssueMetadata = Record<string, unknown> & {
+  number: number;
+  pull_request?: unknown;
+  _comments?: unknown[];
+};
+
+type PullRequestMetadata = Record<string, unknown> & {
+  number: number;
+  _reviews?: unknown[];
+  _review_comments?: unknown[];
+};
+
+type ReleaseAssetMetadata = {
+  browser_download_url?: string;
+  name?: string;
+  content_type?: string;
+};
+
+type ReleaseMetadata = Record<string, unknown> & {
+  tag_name?: string;
+  assets?: ReleaseAssetMetadata[];
+};
+
 export type MetadataOptions = {
   issues?: boolean;
   issueComments?: boolean;
@@ -76,7 +99,7 @@ export class MetadataExtractor {
     owner: string, repo: string, base: string,
     adapters: StorageAdapter[], opts: MetadataOptions, log: (msg: string) => void
   ): Promise<void> {
-    const issues: unknown[] = [];
+    const issues: IssueMetadata[] = [];
     let page = 1;
     while (true) {
       const { data } = await withRetry(
@@ -84,7 +107,7 @@ export class MetadataExtractor {
         { label: `issues ${owner}/${repo} p${page}`, log }
       );
       if (!data.length) break;
-      issues.push(...data.filter((i) => !i.pull_request));
+      issues.push(...(data.filter((i) => !i.pull_request) as IssueMetadata[]));
       if (data.length < 100) break;
       page++;
     }
@@ -93,7 +116,7 @@ export class MetadataExtractor {
       log(`  Fetching comments for ${issues.length} issues`);
       const limit = pLimit(5);
       await Promise.all(
-        (issues as any[]).map((issue) =>
+        issues.map((issue) =>
           limit(async () => {
             issue._comments = await this.fetchIssueComments(owner, repo, issue.number, log);
           })
@@ -125,7 +148,7 @@ export class MetadataExtractor {
     owner: string, repo: string, base: string,
     adapters: StorageAdapter[], opts: MetadataOptions, log: (msg: string) => void
   ): Promise<void> {
-    const prs: unknown[] = [];
+    const prs: PullRequestMetadata[] = [];
     let page = 1;
     while (true) {
       const { data } = await withRetry(
@@ -133,7 +156,7 @@ export class MetadataExtractor {
         { label: `PRs ${owner}/${repo} p${page}`, log }
       );
       if (!data.length) break;
-      prs.push(...data);
+      prs.push(...(data as PullRequestMetadata[]));
       if (data.length < 100) break;
       page++;
     }
@@ -142,7 +165,7 @@ export class MetadataExtractor {
       log(`  Fetching reviews/comments for ${prs.length} PRs`);
       const limit = pLimit(5);
       await Promise.all(
-        (prs as any[]).map((pr) =>
+        prs.map((pr) =>
           limit(async () => {
             if (opts.prReviews) pr._reviews = await this.fetchPRReviews(owner, repo, pr.number, log);
             if (opts.prComments) pr._review_comments = await this.fetchPRComments(owner, repo, pr.number, log);
@@ -183,7 +206,7 @@ export class MetadataExtractor {
     owner: string, repo: string, base: string,
     adapters: StorageAdapter[], opts: MetadataOptions, log: (msg: string) => void
   ): Promise<void> {
-    const releases: unknown[] = [];
+    const releases: ReleaseMetadata[] = [];
     let page = 1;
     while (true) {
       const { data } = await withRetry(
@@ -191,7 +214,7 @@ export class MetadataExtractor {
         { label: `releases ${owner}/${repo} p${page}`, log }
       );
       if (!data.length) break;
-      releases.push(...data);
+      releases.push(...(data as ReleaseMetadata[]));
       if (data.length < 100) break;
       page++;
     }
@@ -202,12 +225,13 @@ export class MetadataExtractor {
     if (opts.releaseAssets && releases.length) {
       const limit = pLimit(3);
       await Promise.all(
-        (releases as any[]).flatMap((release) =>
-          (release.assets ?? []).map((asset: any) =>
+        releases.flatMap((release) =>
+          (release.assets ?? []).map((asset) =>
             limit(async () => {
               try {
+                if (!asset.browser_download_url || !asset.name) return;
                 const content = await this.downloadAsset(asset.browser_download_url);
-                const storagePath = `${base}/releases/assets/${release.tag_name}/${asset.name}`;
+                const storagePath = `${base}/releases/assets/${release.tag_name ?? 'untagged'}/${asset.name}`;
                 await Promise.all(adapters.map((a) =>
                   a.upload(storagePath, content, asset.content_type ?? 'application/octet-stream')
                 ));

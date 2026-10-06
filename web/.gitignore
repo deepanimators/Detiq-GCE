@@ -13,6 +13,9 @@
 # testing
 /coverage
 
+# local run state
+/.detiq-runs
+
 # next.js
 /.next/
 /out/

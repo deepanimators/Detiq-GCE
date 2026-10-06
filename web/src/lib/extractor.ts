@@ -14,6 +14,7 @@ export type ExtractionRequest = {
   targetType: 'user' | 'org';
   targetName: string;
   adapters: StorageAdapter[];
+  repositories?: Repo[];
   skipForks?: boolean;
   skipArchived?: boolean;
   visibility?: 'all' | 'public' | 'private';
@@ -28,6 +29,7 @@ export type ExtractionRequest = {
   metadata?: boolean;
   metadataTypes?: string;
   onLog: (msg: string) => void;
+  signal?: AbortSignal;
 };
 
 export type ExtractionSummary = {
@@ -48,6 +50,7 @@ export async function runExtraction(req: ExtractionRequest): Promise<ExtractionS
   } = req;
 
   const client = new GitHubClient(pat);
+  throwIfAborted(req.signal);
 
   const listOpts: ListRepoOptions = {
     skipForks: req.skipForks,
@@ -57,10 +60,13 @@ export async function runExtraction(req: ExtractionRequest): Promise<ExtractionS
     topics: req.topics,
   };
 
-  onLog(`Listing repos for ${targetType}: ${targetName}`);
-  const repos = targetType === 'user'
-    ? await client.listUserRepos(targetName, listOpts)
-    : await client.listOrgRepos(targetName, listOpts);
+  onLog(req.repositories ? `Using preflight repository snapshot for ${targetType}: ${targetName}` : `Listing repos for ${targetType}: ${targetName}`);
+  const repos = req.repositories ?? (
+    targetType === 'user'
+      ? await client.listUserRepos(targetName, listOpts)
+      : await client.listOrgRepos(targetName, listOpts)
+  );
+  throwIfAborted(req.signal);
 
   if (!repos.length) {
     onLog('No repos found — check PAT permissions and filters');
@@ -127,9 +133,11 @@ async function processRepo(args: {
   const label = `${repo.owner}/${repo.name}`;
   const { dryRun = false } = req;
 
+  throwIfAborted(req.signal);
   onLog(`[start] ${label}`);
 
   let files = await client.getFileTree(repo.owner, repo.name, repo.defaultBranch);
+  throwIfAborted(req.signal);
 
   if (excludePatterns.length) {
     const before = files.length;
@@ -160,8 +168,10 @@ async function processRepo(args: {
     const fileResults = await Promise.allSettled(
       files.map((file) =>
         fileLimit(async () => {
+          throwIfAborted(req.signal);
           const storagePath = `${repo.owner}/${repo.name}/${file.path}`;
           const content = await client.getFileContent(repo.owner, repo.name, file.sha);
+          throwIfAborted(req.signal);
           await Promise.all(adapters.map(async (a) => {
             try {
               await a.upload(storagePath, content, getMimeType(file.path));
@@ -196,9 +206,16 @@ async function processRepo(args: {
 
   // Metadata after files
   if (metadataOpts) {
+    throwIfAborted(req.signal);
     onLog(`  Extracting metadata for ${label}`);
     const extractor = new MetadataExtractor(pat);
     await extractor.extract(repo.owner, repo.name, adapters, metadataOpts, onLog);
+  }
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw new Error('Run cancelled');
   }
 }
 

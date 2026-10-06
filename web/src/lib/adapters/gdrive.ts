@@ -1,9 +1,16 @@
 import { google, drive_v3 } from 'googleapis';
 import { Readable } from 'stream';
+import { createHash } from 'crypto';
 import { withRetry } from '@/lib/retry';
-import type { StorageAdapter } from './base';
+import {
+  normalizeStorageError,
+  preflightFailure,
+  type DurableStorageAdapter,
+  type StorageHeadResult,
+  type StoragePreflightResult,
+} from './base';
 
-export class GDriveAdapter implements StorageAdapter {
+export class GDriveAdapter implements DurableStorageAdapter {
   readonly name = 'gdrive';
   private drive: drive_v3.Drive;
   private rootFolderId: string;
@@ -20,18 +27,95 @@ export class GDriveAdapter implements StorageAdapter {
   }
 
   async upload(storagePath: string, content: Buffer, contentType: string): Promise<void> {
-    const parts = storagePath.split('/');
-    const fileName = parts.pop()!;
-    const parentId = await this._buildPath(parts, 0, this.rootFolderId, '');
+    try {
+      const parts = storagePath.split('/');
+      const fileName = parts.pop()!;
+      const parentId = await this._buildPath(parts, 0, this.rootFolderId, '');
 
-    await withRetry(
-      () => this.drive.files.create({
-        requestBody: { name: fileName, parents: [parentId] },
-        media: { mimeType: contentType, body: Readable.from(content) },
+      await withRetry(
+        () => this.drive.files.create({
+          requestBody: { name: fileName, parents: [parentId] },
+          media: { mimeType: contentType, body: Readable.from(content) },
+          fields: 'id',
+        }),
+        { label: `gdrive upload ${storagePath}` }
+      );
+    } catch (error) {
+      throw normalizeStorageError(error, this.name, 'upload');
+    }
+  }
+
+  async preflight(): Promise<StoragePreflightResult> {
+    let fileId: string | undefined;
+    try {
+      await this.drive.files.get({ fileId: this.rootFolderId, fields: 'id,name,mimeType' });
+      const created = await this.drive.files.create({
+        requestBody: {
+          name: `.detiq-preflight-${Date.now()}.txt`,
+          parents: [this.rootFolderId],
+        },
+        media: { mimeType: 'text/plain', body: Readable.from(Buffer.from('detiq-preflight')) },
         fields: 'id',
-      }),
-      { label: `gdrive upload ${storagePath}` }
-    );
+      });
+      fileId = created.data.id ?? undefined;
+      if (fileId) await this.drive.files.delete({ fileId });
+
+      return {
+        adapter: this.name,
+        writable: true,
+        versioning: false,
+        message: 'Drive folder is writable. Use object storage for large compliance backups.',
+      };
+    } catch (error) {
+      if (fileId) {
+        try {
+          await this.drive.files.delete({ fileId });
+        } catch {
+          // Best-effort cleanup only.
+        }
+      }
+      return preflightFailure(this.name, error);
+    }
+  }
+
+  async head(storagePath: string): Promise<StorageHeadResult> {
+    try {
+      const file = await this.findFileByPath(storagePath);
+      if (!file?.id) return { exists: false };
+      return {
+        exists: true,
+        size: file.size ? Number(file.size) : undefined,
+        etag: file.md5Checksum ?? undefined,
+      };
+    } catch (error) {
+      throw normalizeStorageError(error, this.name, 'head');
+    }
+  }
+
+  async verify(storagePath: string, sha256: string): Promise<void> {
+    try {
+      const file = await this.findFileByPath(storagePath);
+      if (!file?.id) throw new Error(`File does not exist: ${storagePath}`);
+      const result = await this.drive.files.get(
+        { fileId: file.id, alt: 'media' },
+        { responseType: 'arraybuffer' }
+      );
+      const actual = createHash('sha256').update(Buffer.from(result.data as ArrayBuffer)).digest('hex');
+      if (actual !== sha256) {
+        throw new Error(`Checksum mismatch for ${storagePath}: expected ${sha256}, got ${actual}`);
+      }
+    } catch (error) {
+      throw normalizeStorageError(error, this.name, 'verify');
+    }
+  }
+
+  async delete(storagePath: string): Promise<void> {
+    try {
+      const file = await this.findFileByPath(storagePath);
+      if (file?.id) await this.drive.files.delete({ fileId: file.id });
+    } catch (error) {
+      throw normalizeStorageError(error, this.name, 'delete');
+    }
   }
 
   private async _buildPath(parts: string[], idx: number, parentId: string, pathSoFar: string): Promise<string> {
@@ -48,7 +132,7 @@ export class GDriveAdapter implements StorageAdapter {
   private async _findOrCreate(name: string, parentId: string, key: string): Promise<string> {
     const res = await withRetry(
       () => this.drive.files.list({
-        q: `name='${name}' and '${parentId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`,
+        q: `name='${escapeDriveQuery(name)}' and '${parentId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`,
         fields: 'files(id)', pageSize: 1,
       }),
       { label: `gdrive findFolder ${key}` }
@@ -64,4 +148,34 @@ export class GDriveAdapter implements StorageAdapter {
     );
     return created.data.id!;
   }
+
+  private async findFileByPath(storagePath: string): Promise<drive_v3.Schema$File | null> {
+    const parts = storagePath.split('/').filter(Boolean);
+    const fileName = parts.pop();
+    if (!fileName) return null;
+
+    let parentId = this.rootFolderId;
+    for (const folderName of parts) {
+      const res = await this.drive.files.list({
+        q: `name='${escapeDriveQuery(folderName)}' and '${parentId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`,
+        fields: 'files(id)',
+        pageSize: 1,
+      });
+      const folderId = res.data.files?.[0]?.id;
+      if (!folderId) return null;
+      parentId = folderId;
+    }
+
+    const res = await this.drive.files.list({
+      q: `name='${escapeDriveQuery(fileName)}' and '${parentId}' in parents and trashed=false`,
+      fields: 'files(id,size,md5Checksum)',
+      pageSize: 1,
+    });
+
+    return res.data.files?.[0] ?? null;
+  }
+}
+
+function escapeDriveQuery(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
 }

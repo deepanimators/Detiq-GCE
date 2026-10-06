@@ -4,7 +4,13 @@ import { GDriveAdapter } from './gdrive';
 import { GitHubTargetAdapter } from './github-target';
 import { AzureAdapter } from './azure';
 
-export type { StorageAdapter } from './base';
+export type {
+  DurableStorageAdapter,
+  StorageAdapter,
+  StorageErrorCategory,
+  StorageHeadResult,
+  StoragePreflightResult,
+} from './base';
 
 export type AdapterConfig = {
   r2?: { accountId: string; accessKeyId: string; secretAccessKey: string; bucket: string };

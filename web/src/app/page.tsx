@@ -19,6 +19,35 @@ type Summary = {
   skippedFiles: number; failedFiles: number;
 };
 
+type RunStatus =
+  | 'queued'
+  | 'preflight_failed'
+  | 'running'
+  | 'paused'
+  | 'completed'
+  | 'partial'
+  | 'failed'
+  | 'cancelled';
+
+type RunRecord = {
+  id: string;
+  status: RunStatus;
+  estimatedRepos: number;
+  discoveredRepos: number;
+  completedRepos: number;
+  partialRepos: number;
+  failedRepos: number;
+  bytesUploaded: number;
+  errorCode?: string;
+  errorMessage?: string;
+};
+
+type RunEventEnvelope = {
+  event?: { type: string; message?: string; sequence: number; errorCode?: string };
+  run?: RunRecord;
+  error?: string;
+};
+
 const METADATA_TYPES = [
   { id: 'issues', label: 'Issues' },
   { id: 'issue-comments', label: 'Issue comments' },
@@ -185,6 +214,7 @@ export default function Home() {
   const [logs, setLogs] = useState<string[]>([]);
   const [running, setRunning] = useState(false);
   const [summary, setSummary] = useState<Summary | null>(null);
+  const [currentRun, setCurrentRun] = useState<RunRecord | null>(null);
   const [formHydrated, setFormHydrated] = useState(false);
   const logsEndRef = useRef<HTMLDivElement>(null);
 
@@ -313,9 +343,10 @@ export default function Home() {
     setRunning(true);
     setLogs([]);
     setSummary(null);
+    setCurrentRun(null);
 
     try {
-      const res = await fetch('/api/extract', {
+      const res = await fetch('/api/runs', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -343,48 +374,83 @@ export default function Home() {
         }),
       });
 
-      if (!res.ok) {
-        const errorBody = await res.text();
-        throw new Error(errorBody || `Request failed with HTTP ${res.status}`);
-      }
-      if (!res.body) throw new Error('The server returned no live log stream');
+      const body = await res.json();
+      if (!body.run) throw new Error(body.error || `Request failed with HTTP ${res.status}`);
+      setCurrentRun(body.run);
 
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
+      if (body.preflight?.warnings?.length) {
+        body.preflight.warnings.forEach((warning: string) => addLog(`[warn] ${warning}`));
+      }
+      if (body.preflight?.adapters?.length) {
+        body.preflight.adapters.forEach((adapter: { adapter: string; writable: boolean; message?: string; errorCode?: string }) => {
+          addLog(`${adapter.writable ? '[preflight ok]' : '[preflight failed]'} ${adapter.adapter}: ${adapter.message ?? adapter.errorCode ?? ''}`);
+        });
+      }
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const parts = buffer.split('\n\n');
-        buffer = parts.pop() ?? '';
-        for (const part of parts) {
-          const line = part.replace(/^data: /, '').trim();
-          if (!line) continue;
-          try {
-            const event = JSON.parse(line);
-            if (event.msg) addLog(event.msg);
-            if (event.error) addLog(`ERROR: ${event.error}`);
-            if (event.done && event.summary) setSummary(event.summary);
-          } catch (e) {
-            addLog(`[parse error] ${e}`);
-          }
-        }
+      addLog(`Run ID: ${body.run.id}`);
+      if (!res.ok || body.run.status === 'preflight_failed') {
+        addLog(`ERROR: ${body.run.errorMessage ?? body.error ?? 'Preflight failed'}`);
+        setRunning(false);
+        return;
       }
-      buffer += decoder.decode();
-      const finalLine = buffer.replace(/^data: /, '').trim();
-      if (finalLine) {
-        const event = JSON.parse(finalLine);
-        if (event.msg) addLog(event.msg);
-        if (event.error) addLog(`ERROR: ${event.error}`);
-        if (event.done && event.summary) setSummary(event.summary);
-      }
+
+      await watchRun(body.run.id);
     } catch (e) {
       addLog(`Connection error: ${e}`);
+      setRunning(false);
+    }
+  }
+
+  async function watchRun(runId: string) {
+    return new Promise<void>((resolve) => {
+      const events = new EventSource(`/api/runs/${runId}/events`);
+
+      events.onmessage = (message) => {
+        try {
+          const data = JSON.parse(message.data) as RunEventEnvelope;
+          if (data.error) addLog(`ERROR: ${data.error}`);
+          if (data.run) {
+            setCurrentRun(data.run);
+            if (isTerminalStatus(data.run.status)) {
+              setRunning(false);
+              events.close();
+              resolve();
+            }
+          }
+          if (data.event?.message) {
+            const prefix = data.event.type === 'run.log' ? '' : `[${data.event.type}] `;
+            addLog(`${prefix}${data.event.message}`);
+          }
+        } catch (e) {
+          addLog(`[parse error] ${e}`);
+        }
+      };
+
+      events.onerror = () => {
+        addLog('Connection error: live run events disconnected');
+        setRunning(false);
+        events.close();
+        resolve();
+      };
+    });
+  }
+
+  async function cancelRun() {
+    if (!currentRun || !running) return;
+    try {
+      const res = await fetch(`/api/runs/${currentRun.id}/cancel`, { method: 'POST' });
+      const body = await res.json();
+      if (body.run) setCurrentRun(body.run);
+      addLog('Cancellation requested');
+    } catch (e) {
+      addLog(`ERROR: ${e}`);
     } finally {
       setRunning(false);
     }
+  }
+
+  function isTerminalStatus(status: RunStatus) {
+    return ['preflight_failed', 'completed', 'partial', 'failed', 'cancelled'].includes(status);
   }
 
   const canRun = pat && targetName && (dryRun || countAdapters() > 0);
@@ -566,8 +632,8 @@ export default function Home() {
 
           <Button onClick={startExtraction} disabled={running || !canRun} className="w-full h-10">
             {running
-              ? 'Extracting...'
-              : `Start Extraction${countAdapters() > 1 ? ` → ${countAdapters()} targets` : ''}${metadataEnabled ? ' + metadata' : ''}`}
+              ? 'Run active...'
+              : `Create Backup Run${countAdapters() > 1 ? ` → ${countAdapters()} targets` : ''}${metadataEnabled ? ' + metadata' : ''}`}
           </Button>
           <p className="text-[11px] text-zinc-400 px-1">
             Configuration is saved locally in this browser and restored after refresh. Clear this site&apos;s
@@ -580,14 +646,20 @@ export default function Home() {
           <div className="flex items-center justify-between px-4 py-3 border-b border-zinc-100 dark:border-zinc-800 flex-shrink-0">
             <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-50">Live Log</h2>
             <div className="flex items-center gap-3">
+              {currentRun && (
+                <span className="text-xs text-zinc-400 font-mono">{currentRun.id.slice(0, 8)}</span>
+              )}
               {running && (
                 <span className="flex items-center gap-1.5 text-xs text-emerald-600">
                   <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                  Running
+                  {currentRun?.status ?? 'Queued'}
                 </span>
               )}
+              {running && currentRun && (
+                <button onClick={cancelRun} className="text-xs text-red-500 hover:text-red-700">Cancel</button>
+              )}
               {!running && logs.length > 0 && (
-                <button onClick={() => { setLogs([]); setSummary(null); }}
+                <button onClick={() => { setLogs([]); setSummary(null); setCurrentRun(null); }}
                   className="text-xs text-zinc-400 hover:text-zinc-600">Clear</button>
               )}
             </div>
@@ -633,6 +705,26 @@ export default function Home() {
                 <p className="text-xs text-zinc-400 text-center">
                   {summary.totalFiles} total files{summary.skippedFiles > 0 ? ` · ${summary.skippedFiles} skipped` : ''}
                 </p>
+              )}
+            </div>
+          )}
+
+          {currentRun && !summary && (
+            <div className="border-t border-zinc-100 dark:border-zinc-800 p-4 flex-shrink-0">
+              <div className="grid grid-cols-3 gap-3 mb-2">
+                {[
+                  { label: 'Status', value: currentRun.status, ok: !['failed', 'partial', 'preflight_failed'].includes(currentRun.status) },
+                  { label: 'Repos', value: `${currentRun.completedRepos}/${currentRun.discoveredRepos || currentRun.estimatedRepos}`, ok: currentRun.failedRepos === 0 },
+                  { label: 'Failed', value: currentRun.failedRepos, ok: currentRun.failedRepos === 0 },
+                ].map((s) => (
+                  <div key={s.label} className="text-center bg-zinc-50 dark:bg-zinc-800 rounded-lg py-2 min-w-0">
+                    <div className={`text-sm font-semibold truncate px-1 ${s.ok ? 'text-zinc-900 dark:text-zinc-50' : 'text-red-500'}`}>{s.value}</div>
+                    <div className="text-xs text-zinc-500">{s.label}</div>
+                  </div>
+                ))}
+              </div>
+              {currentRun.errorMessage && (
+                <p className="text-xs text-red-500 text-center break-words">{currentRun.errorMessage}</p>
               )}
             </div>
           )}

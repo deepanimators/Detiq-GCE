@@ -128,7 +128,17 @@ export class GitHubClient {
   }
 }
 
-function toRepo(r: Record<string, any>, fallbackOwner: string): Repo {
+type GitHubRepoApiResponse = {
+  owner?: { login?: string };
+  name: string;
+  default_branch?: string;
+  private?: boolean;
+  fork?: boolean;
+  archived?: boolean;
+  topics?: string[];
+};
+
+function toRepo(r: GitHubRepoApiResponse, fallbackOwner: string): Repo {
   return {
     owner: r.owner?.login ?? fallbackOwner,
     name: r.name,
