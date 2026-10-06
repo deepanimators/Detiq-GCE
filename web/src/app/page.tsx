@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useRef } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { Button } from '@/components/ui/button';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -30,6 +30,8 @@ const METADATA_TYPES = [
   { id: 'labels', label: 'Labels' },
   { id: 'milestones', label: 'Milestones' },
 ];
+
+const FORM_STORAGE_KEY = 'detiq-gce-form-v1';
 
 // ── Shared UI components ──────────────────────────────────────────────────────
 
@@ -183,7 +185,87 @@ export default function Home() {
   const [logs, setLogs] = useState<string[]>([]);
   const [running, setRunning] = useState(false);
   const [summary, setSummary] = useState<Summary | null>(null);
+  const [formHydrated, setFormHydrated] = useState(false);
   const logsEndRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(FORM_STORAGE_KEY);
+      if (saved) {
+        const state = JSON.parse(saved) as Record<string, unknown>;
+        const setString = (key: string, setter: (value: string) => void) => {
+          if (typeof state[key] === 'string') setter(state[key] as string);
+        };
+        const setBoolean = (key: string, setter: (value: boolean) => void) => {
+          if (typeof state[key] === 'boolean') setter(state[key] as boolean);
+        };
+
+        setString('pat', setPat);
+        setString('targetName', setTargetName);
+        setString('matchRegex', setMatchRegex);
+        setString('topics', setTopics);
+        setString('maxFileSizeKb', setMaxFileSizeKb);
+        setString('extraExcludes', setExtraExcludes);
+        setString('repoConcurrency', setRepoConcurrency);
+        setString('fileConcurrency', setFileConcurrency);
+        setString('r2AccountId', setR2AccountId);
+        setString('r2AccessKey', setR2AccessKey);
+        setString('r2SecretKey', setR2SecretKey);
+        setString('r2Bucket', setR2Bucket);
+        setString('s3Region', setS3Region);
+        setString('s3AccessKey', setS3AccessKey);
+        setString('s3SecretKey', setS3SecretKey);
+        setString('s3Bucket', setS3Bucket);
+        setString('gdriveEmail', setGdriveEmail);
+        setString('gdriveKey', setGdriveKey);
+        setString('gdriveFolderId', setGdriveFolderId);
+        setString('ghOwner', setGhOwner);
+        setString('ghRepo', setGhRepo);
+        setString('ghBranch', setGhBranch);
+        setString('ghPat', setGhPat);
+        setString('azureConn', setAzureConn);
+        setString('azureContainer', setAzureContainer);
+        if (state.targetType === 'user' || state.targetType === 'org') setTargetType(state.targetType);
+        if (state.visibility === 'all' || state.visibility === 'public' || state.visibility === 'private') setVisibility(state.visibility);
+        setBoolean('skipForks', setSkipForks);
+        setBoolean('skipArchived', setSkipArchived);
+        setBoolean('dryRun', setDryRun);
+        setBoolean('useDefaultExcludes', setUseDefaultExcludes);
+        setBoolean('metadataEnabled', setMetadataEnabled);
+        setBoolean('r2On', setR2On);
+        setBoolean('s3On', setS3On);
+        setBoolean('gdriveOn', setGdriveOn);
+        setBoolean('ghOn', setGhOn);
+        setBoolean('azureOn', setAzureOn);
+        if (Array.isArray(state.metadataTypes)) {
+          setMetadataTypes(new Set(state.metadataTypes.filter((v): v is string => typeof v === 'string')));
+        }
+      }
+    } catch {
+      localStorage.removeItem(FORM_STORAGE_KEY);
+    } finally {
+      setFormHydrated(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!formHydrated) return;
+    localStorage.setItem(FORM_STORAGE_KEY, JSON.stringify({
+      pat, targetType, targetName, visibility, skipForks, skipArchived, dryRun,
+      matchRegex, topics, maxFileSizeKb, useDefaultExcludes, extraExcludes,
+      repoConcurrency, fileConcurrency, metadataEnabled, metadataTypes: [...metadataTypes],
+      r2On, s3On, gdriveOn, ghOn, azureOn, r2AccountId, r2AccessKey, r2SecretKey,
+      r2Bucket, s3Region, s3AccessKey, s3SecretKey, s3Bucket, gdriveEmail, gdriveKey,
+      gdriveFolderId, ghOwner, ghRepo, ghBranch, ghPat, azureConn, azureContainer,
+    }));
+  }, [
+    formHydrated, pat, targetType, targetName, visibility, skipForks, skipArchived, dryRun,
+    matchRegex, topics, maxFileSizeKb, useDefaultExcludes, extraExcludes,
+    repoConcurrency, fileConcurrency, metadataEnabled, metadataTypes, r2On, s3On,
+    gdriveOn, ghOn, azureOn, r2AccountId, r2AccessKey, r2SecretKey, r2Bucket,
+    s3Region, s3AccessKey, s3SecretKey, s3Bucket, gdriveEmail, gdriveKey,
+    gdriveFolderId, ghOwner, ghRepo, ghBranch, ghPat, azureConn, azureContainer,
+  ]);
 
   function addLog(msg: string) {
     setLogs((prev) => {
@@ -254,7 +336,13 @@ export default function Home() {
         }),
       });
 
-      const reader = res.body!.getReader();
+      if (!res.ok) {
+        const errorBody = await res.text();
+        throw new Error(errorBody || `Request failed with HTTP ${res.status}`);
+      }
+      if (!res.body) throw new Error('The server returned no live log stream');
+
+      const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
 
@@ -277,11 +365,19 @@ export default function Home() {
           }
         }
       }
+      buffer += decoder.decode();
+      const finalLine = buffer.replace(/^data: /, '').trim();
+      if (finalLine) {
+        const event = JSON.parse(finalLine);
+        if (event.msg) addLog(event.msg);
+        if (event.error) addLog(`ERROR: ${event.error}`);
+        if (event.done && event.summary) setSummary(event.summary);
+      }
     } catch (e) {
       addLog(`Connection error: ${e}`);
+    } finally {
+      setRunning(false);
     }
-
-    setRunning(false);
   }
 
   const canRun = pat && targetName && (dryRun || countAdapters() > 0);
@@ -307,10 +403,10 @@ export default function Home() {
         </div>
       </header>
 
-      <main className="max-w-6xl mx-auto px-6 py-8 grid grid-cols-1 xl:grid-cols-[500px_1fr] gap-6">
+      <main className="max-w-6xl mx-auto px-4 sm:px-6 py-8 grid grid-cols-1 xl:grid-cols-[minmax(0,500px)_minmax(0,1fr)] gap-6 items-start">
 
         {/* ── Left: config ──────────────────────────────────────────────── */}
-        <div className="space-y-4">
+        <div className="space-y-4 min-w-0">
 
           {/* Source */}
           <Section title="GitHub Source">

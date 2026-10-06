@@ -162,7 +162,13 @@ async function processRepo(args: {
         fileLimit(async () => {
           const storagePath = `${repo.owner}/${repo.name}/${file.path}`;
           const content = await client.getFileContent(repo.owner, repo.name, file.sha);
-          await Promise.all(adapters.map((a) => a.upload(storagePath, content, getMimeType(file.path))));
+          await Promise.all(adapters.map(async (a) => {
+            try {
+              await a.upload(storagePath, content, getMimeType(file.path));
+            } catch (error) {
+              throw new Error(`${a.name}: ${formatError(error)}`);
+            }
+          }));
           uploaded++;
           if (uploaded % 50 === 0) onLog(`  Progress: ${uploaded}/${files.length} in ${label}`);
         })
@@ -172,13 +178,20 @@ async function processRepo(args: {
     fileResults.forEach((r, i) => {
       if (r.status === 'rejected') {
         failed++;
-        onLog(`  [warn] File failed: ${files[i]?.path}`);
+        onLog(`  [warn] File failed: ${files[i]?.path} — ${formatError(r.reason)}`);
       }
     });
 
     summary.uploadedFiles += uploaded;
     summary.failedFiles += failed;
     onLog(`[done] ${label} — ${uploaded} uploaded${failed ? `, ${failed} failed` : ''}`);
+  }
+
+  function formatError(error: unknown): string {
+    if (error instanceof Error) return error.message;
+    if (typeof error === 'string') return error;
+    if (error && typeof error === 'object' && 'message' in error) return String(error.message);
+    return String(error);
   }
 
   // Metadata after files
