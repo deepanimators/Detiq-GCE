@@ -1,6 +1,11 @@
 import { runPreflight } from '@/lib/preflight';
 import { adapterNamesFromConfig, parseRunCreatePayload } from '@/lib/runs/request';
-import { createRunRecord, emitRunEvent, getRunStore } from '@/lib/runs/store';
+import {
+  createRunRecord,
+  emitRunEvent,
+  getRunStore,
+  RunStoreConfigurationError,
+} from '@/lib/runs/store';
 import { queueRun } from '@/lib/runs/worker';
 
 export const runtime = 'nodejs';
@@ -55,6 +60,12 @@ export async function POST(req: Request) {
     const stored = await store.getRun(run.id);
     return Response.json({ run: stored?.run ?? run, preflight: preflightResponse }, { status: 202 });
   } catch (error) {
+    if (error instanceof RunStoreConfigurationError) {
+      return Response.json(
+        { error: { code: 'RUN_STORE_NOT_CONFIGURED', message: error.message } },
+        { status: 503 }
+      );
+    }
     return Response.json(
       { error: error instanceof Error ? error.message : String(error) },
       { status: 400 }
