@@ -729,19 +729,40 @@ export default function Home() {
   async function watchRun(runId: string) {
     return new Promise<void>((resolve) => {
       const events = new EventSource(`/api/runs/${runId}/events`);
+      let settled = false;
+      let pollTimer: ReturnType<typeof setInterval> | undefined;
+
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        if (pollTimer) clearInterval(pollTimer);
+        events.close();
+        resolve();
+      };
+
+      const applyRun = (run: RunRecord) => {
+        setCurrentRun(run);
+        if (isTerminalStatus(run.status)) {
+          setRunning(false);
+          finish();
+        }
+      };
+
+      const pollRun = async () => {
+        try {
+          const response = await fetch(`/api/runs/${runId}`, { cache: 'no-store' });
+          const body = await response.json() as { run?: RunRecord };
+          if (body.run) applyRun(body.run);
+        } catch {
+          // The next interval retries while the durable run remains active.
+        }
+      };
 
       events.onmessage = (message) => {
         try {
           const data = JSON.parse(message.data) as RunEventEnvelope;
           if (data.error) addLog(`ERROR: ${data.error}`);
-          if (data.run) {
-            setCurrentRun(data.run);
-            if (isTerminalStatus(data.run.status)) {
-              setRunning(false);
-              events.close();
-              resolve();
-            }
-          }
+          if (data.run) applyRun(data.run);
           if (data.event?.message) {
             const prefix = data.event.type === 'run.log' ? '' : `[${data.event.type}] `;
             addLog(`${prefix}${data.event.message}`);
@@ -752,10 +773,11 @@ export default function Home() {
       };
 
       events.onerror = () => {
-        addLog('Connection error: live run events disconnected');
-        setRunning(false);
+        if (settled) return;
+        addLog('Live events disconnected; continuing with durable run polling.');
         events.close();
-        resolve();
+        void pollRun();
+        pollTimer = setInterval(() => void pollRun(), 3000);
       };
     });
   }

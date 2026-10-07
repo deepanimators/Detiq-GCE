@@ -1,4 +1,4 @@
-import { GitHubClient, type ListRepoOptions } from '@/lib/github';
+import { formatGitHubError, getGitHubErrorDetails, GitHubClient, type ListRepoOptions } from '@/lib/github';
 
 export const runtime = 'nodejs';
 
@@ -33,9 +33,15 @@ export async function POST(req: Request) {
       : repos;
     return Response.json({ repositories });
   } catch (error) {
+    const details = getGitHubErrorDetails(error);
     return Response.json(
-      { error: error instanceof Error ? error.message : String(error) },
-      { status: 400 }
+      {
+        error: formatGitHubError(error),
+        code: details.status === 401 ? 'GITHUB_UNAUTHORIZED' : details.status === 403 ? 'GITHUB_FORBIDDEN' : 'GITHUB_REQUEST_FAILED',
+        status: details.status,
+        documentationUrl: details.documentationUrl,
+      },
+      { status: details.status && details.status >= 400 && details.status < 500 ? details.status : 502 }
     );
   }
 }

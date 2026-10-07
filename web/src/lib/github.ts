@@ -3,6 +3,70 @@ import { withRetry } from '@/lib/retry';
 
 export type GitHubFile = { path: string; sha: string; size: number };
 
+export type GitHubErrorDetails = {
+  status?: number;
+  message: string;
+  documentationUrl?: string;
+  rateLimitRemaining?: number;
+  rateLimitReset?: number;
+  retryAfter?: number;
+  ssoRequired?: boolean;
+};
+
+export function getGitHubErrorDetails(error: unknown): GitHubErrorDetails {
+  const value = error as {
+    status?: number;
+    message?: string;
+    response?: {
+      status?: number;
+      data?: { message?: string; documentation_url?: string };
+      headers?: Record<string, string | number | undefined>;
+    };
+  };
+  const response = value.response;
+  const status = value.status ?? response?.status;
+  const headers = response?.headers ?? {};
+  const remaining = headers['x-ratelimit-remaining'];
+  const reset = headers['x-ratelimit-reset'];
+  const retryAfter = headers['retry-after'];
+  const sso = headers['x-github-sso'];
+  return {
+    status,
+    message: response?.data?.message ?? value.message ?? 'GitHub request failed.',
+    documentationUrl: response?.data?.documentation_url,
+    rateLimitRemaining: remaining === undefined ? undefined : Number(remaining),
+    rateLimitReset: reset === undefined ? undefined : Number(reset),
+    retryAfter: retryAfter === undefined ? undefined : Number(retryAfter),
+    ssoRequired: typeof sso === 'string' && sso.length > 0,
+  };
+}
+
+export function formatGitHubError(error: unknown): string {
+  const details = getGitHubErrorDetails(error);
+  if (details.status === 401) {
+    return 'GitHub rejected the token (401). Check that the PAT is valid and has not expired.';
+  }
+  if (details.status === 403 && details.rateLimitRemaining === 0) {
+    const reset = details.rateLimitReset
+      ? ` Reset: ${new Date(details.rateLimitReset * 1000).toISOString()}.`
+      : '';
+    return `GitHub rate limit exhausted (403). Wait for the reset window and retry.${reset}`;
+  }
+  if (details.status === 403 && details.retryAfter) {
+    return `GitHub secondary rate limit triggered (403). Retry after ${details.retryAfter}s and lower file concurrency.`;
+  }
+  if (details.status === 403 && details.ssoRequired) {
+    return 'GitHub denied access (403). The PAT likely needs organization SSO authorization.';
+  }
+  if (details.status === 403) {
+    return `GitHub denied access (403): ${details.message} Check repository access, organization SSO authorization, PAT permissions, and API concurrency.`;
+  }
+  if (details.status === 404) {
+    return `GitHub resource was not found (404): ${details.message} Check the organization/user name and token visibility.`;
+  }
+  return details.status ? `GitHub request failed (${details.status}): ${details.message}` : details.message;
+}
+
 export type Repo = {
   owner: string;
   name: string;

@@ -1,9 +1,11 @@
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 type RetryErrorShape = {
+  message?: string;
   status?: number;
   response?: {
     status?: number;
+    data?: { message?: string };
     headers?: Record<string, string | number | undefined>;
   };
 };
@@ -22,7 +24,17 @@ function getRateLimitResetMs(err: unknown): number | null {
 function isRateLimited(err: unknown): boolean {
   const retryError = err as RetryErrorShape;
   const status = retryError.status ?? retryError.response?.status;
-  return status === 429 || status === 403;
+  if (status === 429) return true;
+  if (status !== 403) return false;
+
+  const headers = retryError.response?.headers;
+  if (headers?.['retry-after'] !== undefined) return true;
+
+  const remaining = headers?.['x-ratelimit-remaining'];
+  if (remaining !== undefined && Number(remaining) === 0) return true;
+
+  const message = `${retryError.response?.data?.message ?? retryError.message ?? ''}`.toLowerCase();
+  return message.includes('secondary rate limit') || message.includes('api rate limit exceeded');
 }
 
 export async function withRetry<T>(

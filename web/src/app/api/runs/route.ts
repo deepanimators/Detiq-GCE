@@ -9,6 +9,7 @@ import {
 import { RunObjectStoreConfigurationError } from '@/lib/runs/object-store';
 import { RunQueueConfigurationError } from '@/lib/runs/queue';
 import { queueRun } from '@/lib/runs/worker';
+import { formatGitHubError, getGitHubErrorDetails } from '@/lib/github';
 
 export const runtime = 'nodejs';
 export const maxDuration = 300;
@@ -80,6 +81,13 @@ export async function POST(req: Request) {
           },
         },
         { status: 503 }
+      );
+    }
+    const details = getGitHubErrorDetails(error);
+    if (details.status === 401 || details.status === 403) {
+      return Response.json(
+        { error: formatGitHubError(error), code: details.status === 401 ? 'GITHUB_UNAUTHORIZED' : 'GITHUB_FORBIDDEN' },
+        { status: details.status }
       );
     }
     return Response.json(

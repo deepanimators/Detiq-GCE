@@ -5,9 +5,10 @@ export const runtime = 'nodejs';
 export const maxDuration = 300;
 
 function authorized(req: Request): boolean {
-  const expected = normalizeSecret(process.env.CRON_SECRET);
+  const expected = normalizeSecret(process.env.WORKER_SECRET ?? process.env.CRON_SECRET);
   const supplied =
     req.headers.get('x-cron-secret') ??
+    req.headers.get('x-worker-secret') ??
     req.headers.get('authorization')?.replace(/^Bearer\s+/i, '') ??
     '';
   const normalizedSupplied = normalizeSecret(supplied);
@@ -20,7 +21,16 @@ function normalizeSecret(value: string | undefined): string {
 }
 
 async function handleWorkerRequest(req: Request): Promise<Response> {
-  if (!authorized(req)) return Response.json({ error: 'Unauthorized' }, { status: 401 });
+  if (!authorized(req)) {
+    return Response.json(
+      {
+        error: 'Unauthorized',
+        code: 'WORKER_UNAUTHORIZED',
+        message: 'Set WORKER_SECRET or CRON_SECRET in Vercel and send it as Bearer, x-worker-secret, or x-cron-secret.',
+      },
+      { status: 401 }
+    );
+  }
   try {
     const processed = await processNextQueuedRun();
     return Response.json({ ok: true, processed });

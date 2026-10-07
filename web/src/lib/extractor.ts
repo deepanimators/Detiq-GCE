@@ -1,5 +1,5 @@
 import pLimit from 'p-limit';
-import { GitHubClient, type Repo, type ListRepoOptions } from '@/lib/github';
+import { formatGitHubError, GitHubClient, type Repo, type ListRepoOptions } from '@/lib/github';
 import type { StorageAdapter } from '@/lib/adapters/base';
 import { getMimeType } from '@/lib/mime';
 import { MetadataExtractor, parseMetadataTypes, type MetadataOptions } from '@/lib/metadata';
@@ -106,7 +106,7 @@ export async function runExtraction(req: ExtractionRequest): Promise<ExtractionS
   summary.successRepos = results.filter((r) => r.status === 'fulfilled').length;
   results
     .filter((r): r is PromiseRejectedResult => r.status === 'rejected')
-    .forEach((f) => onLog(`[error] Repo failed: ${f.reason}`));
+    .forEach((f) => onLog(`[error] Repo failed: ${formatGitHubError(f.reason)}`));
 
   onLog('');
   onLog('=== Summary ===');
@@ -164,13 +164,25 @@ async function processRepo(args: {
     const fileLimit = pLimit(fileConcurrency);
     let uploaded = 0;
     let failed = 0;
+    let fatalContentErrorMessage: string | null = null;
 
     const fileResults = await Promise.allSettled(
       files.map((file) =>
         fileLimit(async () => {
+          if (fatalContentErrorMessage) throw new Error(fatalContentErrorMessage);
           throwIfAborted(req.signal);
           const storagePath = `${repo.owner}/${repo.name}/${file.path}`;
-          const content = await client.getFileContent(repo.owner, repo.name, file.sha);
+          let content: Buffer;
+          try {
+            content = await client.getFileContent(repo.owner, repo.name, file.sha);
+          } catch (error) {
+            const message = formatGitHubError(error);
+            if (message.includes('(403)')) {
+              fatalContentErrorMessage = `${message} Stopping ${label} to avoid repeating the same GitHub failure for every file.`;
+              throw new Error(fatalContentErrorMessage);
+            }
+            throw error;
+          }
           throwIfAborted(req.signal);
           await Promise.all(adapters.map(async (a) => {
             try {
@@ -191,6 +203,11 @@ async function processRepo(args: {
         onLog(`  [warn] File failed: ${files[i]?.path} — ${formatError(r.reason)}`);
       }
     });
+
+    if (fatalContentErrorMessage) {
+      onLog(`  [error] ${fatalContentErrorMessage}`);
+      throw new Error(fatalContentErrorMessage);
+    }
 
     summary.uploadedFiles += uploaded;
     summary.failedFiles += failed;

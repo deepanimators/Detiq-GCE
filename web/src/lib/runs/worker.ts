@@ -10,7 +10,7 @@ import {
   isDurableRunQueueConfigured,
   RunQueueConfigurationError,
 } from './queue';
-import type { QueuedRun, RunCreatePayload } from './types';
+import type { RunCreatePayload } from './types';
 
 type ActiveRun = {
   controller: AbortController;
@@ -30,7 +30,7 @@ export async function queueRun(runId: string, payload: RunCreatePayload, reposit
   await enqueueRun({ runId, payload, repositories, enqueuedAt: new Date().toISOString() });
 
   const directLimit = Number(process.env.DIRECT_RUN_REPO_LIMIT ?? 0);
-  if (process.env.VERCEL !== '1' && directLimit > 0 && repositories.length <= directLimit) {
+  if (!isVercelRuntime() && directLimit > 0 && repositories.length <= directLimit) {
     await processNextQueuedRun();
   }
 }
@@ -128,4 +128,8 @@ async function executeRun(
       { durationMs: Date.now() - startedAt, errorCode: status === 'cancelled' ? 'RunCancelled' : 'RunFailed' }
     );
   }
+}
+
+function isVercelRuntime(): boolean {
+  return Boolean(process.env.VERCEL || process.env.VERCEL_ENV || process.env.VERCEL_URL);
 }

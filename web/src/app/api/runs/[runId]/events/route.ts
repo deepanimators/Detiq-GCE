@@ -3,6 +3,8 @@ import { getRunStore } from '@/lib/runs/store';
 export const runtime = 'nodejs';
 
 const TERMINAL_STATUSES = new Set(['preflight_failed', 'completed', 'partial', 'failed', 'cancelled']);
+const POLL_INTERVAL_MS = 1000;
+const STREAM_TTL_MS = 25_000;
 
 export async function GET(
   req: Request,
@@ -19,8 +21,24 @@ export async function GET(
 
   const stream = new ReadableStream({
     async start(controller) {
+      let closed = false;
       const send = (data: object) => {
+        if (closed) return;
         controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
+      };
+
+      controller.enqueue(encoder.encode('retry: 2000\n\n'));
+
+      const close = () => {
+        if (closed) return;
+        closed = true;
+        clearInterval(timer);
+        clearTimeout(ttl);
+        try {
+          controller.close();
+        } catch {
+          // Already closed.
+        }
       };
 
       const timer = setInterval(async () => {
@@ -28,8 +46,7 @@ export async function GET(
           const stored = await store.getRun(runId);
           if (!stored) {
             send({ error: 'Run not found' });
-            clearInterval(timer);
-            controller.close();
+            close();
             return;
           }
 
@@ -40,23 +57,21 @@ export async function GET(
           }
 
           if (TERMINAL_STATUSES.has(stored.run.status)) {
-            clearInterval(timer);
-            controller.close();
+            close();
           }
         } catch (error) {
           send({ error: error instanceof Error ? error.message : String(error) });
-          clearInterval(timer);
-          controller.close();
+          close();
         }
-      }, 1000);
+      }, POLL_INTERVAL_MS);
+
+      const ttl = setTimeout(() => {
+        send({ reconnect: true, after: cursor });
+        close();
+      }, STREAM_TTL_MS);
 
       req.signal.addEventListener('abort', () => {
-        clearInterval(timer);
-        try {
-          controller.close();
-        } catch {
-          // Already closed.
-        }
+        close();
       });
     },
   });
