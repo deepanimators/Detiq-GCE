@@ -215,7 +215,10 @@ async function executeRun(
       signal: controller.signal,
     });
     const summary = await withRunTimeout(extraction, controller, runTimeoutMs());
-
+    if (heartbeatInterval) {
+      clearInterval(heartbeatInterval);
+      heartbeatInterval = undefined;
+    }
     await logChain;
 
     const retryAfterRateLimit = getRetryAfterRateLimit(summary.rateLimitResetAt);
