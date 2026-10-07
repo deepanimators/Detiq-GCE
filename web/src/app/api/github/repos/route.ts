@@ -16,9 +16,9 @@ export async function POST(req: Request) {
       visibility: body.visibility === 'public' || body.visibility === 'private' ? body.visibility : 'all',
       skipForks: body.skipForks === true,
       skipArchived: body.skipArchived === true,
-      matchRegex: typeof body.matchRegex === 'string' && body.matchRegex ? body.matchRegex : undefined,
+      matchRegex: typeof body.matchRegex === 'string' && body.matchRegex.length > 0 ? body.matchRegex : undefined,
       topics: Array.isArray(body.topics)
-        ? body.topics.filter((topic): topic is string => typeof topic === 'string' && topic.trim()).map((topic) => topic.trim())
+        ? body.topics.filter((topic): topic is string => typeof topic === 'string' && topic.trim().length > 0).map((topic) => topic.trim())
         : undefined,
     };
     const client = new GitHubClient(pat);
