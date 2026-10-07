@@ -197,7 +197,12 @@ async function processRepo(args: {
     if (dryRun) {
       onLog(`[done] ${label} (dry-run mirror)`);
     } else {
-      await processMirrorRepo({ repo, adapters, req, summary, pat, onLog });
+      const alreadyCopied = await isMirrorBundleComplete(adapters, repo.owner, repo.name);
+      if (alreadyCopied) {
+        onLog(`  Code backup (mirror) already exists; skipping to metadata.`);
+      } else {
+        await processMirrorRepo({ repo, adapters, req, summary, pat, onLog });
+      }
     }
   } else {
     // Selective API
@@ -378,6 +383,19 @@ function createEmptySummary(totalRepos: number): ExtractionSummary {
     skippedExistingFiles: 0,
     skippedExistingFolders: 0,
   };
+}
+
+async function isMirrorBundleComplete(adapters: StorageAdapter[], owner: string, repo: string): Promise<boolean> {
+  const checks = await Promise.all(adapters.map(async (adapter) => {
+    if (!isDurableStorageAdapter(adapter)) return false;
+    try {
+      const head = await adapter.head(`${owner}/${repo}/repository.bundle`);
+      return head.exists;
+    } catch {
+      return false;
+    }
+  }));
+  return checks.length > 0 && checks.every(c => c);
 }
 
 function createRepoProgress(): RepoProgress {

@@ -1,3 +1,5 @@
+import "dotenv/config";
+
 import { processQueuedRuns } from '../src/lib/runs/worker';
 
 async function main() {
