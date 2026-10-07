@@ -106,6 +106,8 @@ async function executeRun(
 ): Promise<void> {
   const store = getRunStore();
   const startedAt = Date.now();
+  let logChain = Promise.resolve();
+  let timeout: ReturnType<typeof setTimeout> | undefined;
 
   await store.updateRun(runId, {
     status: 'running',
@@ -116,18 +118,32 @@ async function executeRun(
 
   try {
     const adapters = buildAdaptersFromConfig(payload.adapters);
-    const summary = await runExtraction({
+    const emitLog = (message: string) => {
+      const safeMessage = redactSecrets(message);
+      logChain = logChain
+        .catch(() => undefined)
+        .then(() => emitRunEvent(runId, 'run.log', safeMessage))
+        .then(() => undefined);
+    };
+
+    const extraction = runExtraction({
       pat: payload.pat,
       targetType: payload.targetType,
       targetName: payload.targetName,
       adapters,
       repositories,
       ...payload.options,
-      onLog: (message) => {
-        void emitRunEvent(runId, 'run.log', redactSecrets(message));
+      onLog: emitLog,
+      onRepoComplete: (summary) => {
+        void store.updateRun(runId, {
+          completedRepos: summary.successRepos,
+        });
       },
       signal: controller.signal,
     });
+    const summary = await withRunTimeout(extraction, controller, runTimeoutMs());
+
+    await logChain;
 
     const terminalStatus = summary.failedFiles > 0 ? 'partial' : 'completed';
     await store.updateRun(runId, {
@@ -155,12 +171,28 @@ async function executeRun(
       errorMessage: message,
     });
 
+    await logChain;
     await emitRunEvent(
       runId,
       status === 'cancelled' ? 'run.cancelled' : 'run.failed',
       status === 'cancelled' ? 'Run cancelled by operator.' : message,
       { durationMs: Date.now() - startedAt, errorCode: status === 'cancelled' ? 'RunCancelled' : 'RunFailed' }
     );
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+
+  async function withRunTimeout<T>(promise: Promise<T>, activeController: AbortController, timeoutMs: number): Promise<T> {
+    if (!timeoutMs) return promise;
+    return Promise.race([
+      promise,
+      new Promise<T>((_resolve, reject) => {
+        timeout = setTimeout(() => {
+          activeController.abort();
+          reject(new Error(`Worker exceeded ${Math.round(timeoutMs / 1000)}s runtime budget before completing the run.`));
+        }, timeoutMs);
+      }),
+    ]);
   }
 }
 
@@ -170,4 +202,9 @@ function isVercelRuntime(): boolean {
 
 function positiveInteger(value: number, fallback: number): number {
   return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
+}
+
+function runTimeoutMs(): number {
+  const fallback = isVercelRuntime() ? 240_000 : 0;
+  return positiveInteger(Number(process.env.WORKER_RUN_TIMEOUT_MS ?? fallback), fallback);
 }

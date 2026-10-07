@@ -29,6 +29,7 @@ export type ExtractionRequest = {
   metadata?: boolean;
   metadataTypes?: string;
   onLog: (msg: string) => void;
+  onRepoComplete?: (summary: ExtractionSummary) => void;
   signal?: AbortSignal;
 };
 
@@ -228,6 +229,9 @@ async function processRepo(args: {
     const extractor = new MetadataExtractor(pat);
     await extractor.extract(repo.owner, repo.name, adapters, metadataOpts, onLog);
   }
+
+  summary.successRepos += 1;
+  req.onRepoComplete?.({ ...summary });
 }
 
 function throwIfAborted(signal?: AbortSignal): void {

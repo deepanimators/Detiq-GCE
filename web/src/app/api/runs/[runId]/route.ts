@@ -2,7 +2,7 @@ import { after } from 'next/server';
 import { redactSecrets } from '@/lib/adapters/base';
 import { emitRunEvent, getRunStore } from '@/lib/runs/store';
 import { processQueuedRuns } from '@/lib/runs/worker';
-import type { RunEvent } from '@/lib/runs/types';
+import type { RunEvent, StoredRun } from '@/lib/runs/types';
 
 export const runtime = 'nodejs';
 export const maxDuration = 300;
@@ -15,12 +15,45 @@ export async function GET(
   context: { params: Promise<{ runId: string }> }
 ) {
   const { runId } = await context.params;
-  const stored = await getRunStore().getRun(runId);
+  let stored = await getRunStore().getRun(runId);
   if (!stored) return Response.json({ error: 'Run not found' }, { status: 404 });
+  stored = await failStaleRunningRun(stored);
   if (stored.run.status === 'queued' && shouldNudgeQueuedWorker(runId, stored.events)) {
     nudgeQueuedWorker(runId);
   }
   return Response.json(stored);
+}
+
+async function failStaleRunningRun(stored: StoredRun): Promise<StoredRun> {
+  if (stored.run.status !== 'running') return stored;
+
+  const lastEventAt = latestEventTime(stored.events) ?? Date.parse(stored.run.startedAt ?? stored.run.createdAt);
+  if (Date.now() - lastEventAt < staleRunMs()) return stored;
+
+  const store = getRunStore();
+  const message = `Worker stopped reporting progress for ${Math.round(staleRunMs() / 1000)}s. The serverless worker likely exceeded the platform runtime limit before finishing.`;
+  await store.updateRun(stored.run.id, {
+    status: 'failed',
+    completedAt: new Date().toISOString(),
+    errorCode: 'WorkerStale',
+    errorMessage: message,
+  });
+  await emitRunEvent(stored.run.id, 'run.failed', message, { errorCode: 'WorkerStale' });
+  return await store.getRun(stored.run.id) ?? stored;
+}
+
+function latestEventTime(events: RunEvent[]): number | null {
+  const latest = events.at(-1)?.createdAt;
+  return latest ? Date.parse(latest) : null;
+}
+
+function staleRunMs(): number {
+  const fallbackSeconds = process.env.VERCEL ? 420 : 3600;
+  const configuredSeconds = Number(process.env.RUN_STALE_SECONDS ?? fallbackSeconds);
+  const seconds = Number.isFinite(configuredSeconds) && configuredSeconds > 0
+    ? configuredSeconds
+    : fallbackSeconds;
+  return seconds * 1000;
 }
 
 function shouldNudgeQueuedWorker(runId: string, events: RunEvent[]): boolean {
