@@ -53,6 +53,9 @@ export async function processMirrorRepo(args: {
       await fs.promises.writeFile(refsPath, JSON.stringify(refs, null, 2));
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
+      if (msg.includes('ENOENT') && msg.includes('spawn git')) {
+        throw new Error('Git is not installed or not available in this environment\'s PATH. Mirror mode requires the git CLI. If you are running this in a serverless environment like Vercel, use a standalone worker (e.g. npx tsx scripts/worker.ts) on a machine with git installed.');
+      }
       throw new Error(msg.replace(new RegExp(pat, 'g'), '***'));
     }
 
