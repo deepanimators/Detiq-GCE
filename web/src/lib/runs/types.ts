@@ -25,6 +25,13 @@ export type RunEventType =
   | 'run.cancel_requested'
   | 'artifact.verified';
 
+export type QueuedRun = {
+  runId: string;
+  payload: RunCreatePayload;
+  repositories: import('@/lib/github').Repo[];
+  enqueuedAt: string;
+};
+
 export type ExtractOptions = {
   skipForks?: boolean;
   skipArchived?: boolean;

@@ -50,7 +50,7 @@ export async function POST(req: Request) {
     }
 
     await emitRunEvent(run.id, 'run.queued', `Run queued with ${repositories.length} repositories.`);
-    queueRun(run.id, payload, repositories);
+    await queueRun(run.id, payload, repositories);
 
     const stored = await store.getRun(run.id);
     return Response.json({ run: stored?.run ?? run, preflight: preflightResponse }, { status: 202 });

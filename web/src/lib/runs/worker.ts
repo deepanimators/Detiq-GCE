@@ -3,7 +3,8 @@ import { runExtraction } from '@/lib/extractor';
 import { redactSecrets } from '@/lib/adapters/base';
 import type { Repo } from '@/lib/github';
 import { emitRunEvent, getRunStore } from './store';
-import type { RunCreatePayload } from './types';
+import { acknowledgeRun, claimRun, enqueueRun, isDurableRunQueueConfigured } from './queue';
+import type { QueuedRun, RunCreatePayload } from './types';
 
 type ActiveRun = {
   controller: AbortController;
@@ -13,7 +14,11 @@ type ActiveRun = {
 
 const activeRuns = new Map<string, ActiveRun>();
 
-export function queueRun(runId: string, payload: RunCreatePayload, repositories: Repo[]): void {
+export async function queueRun(runId: string, payload: RunCreatePayload, repositories: Repo[]): Promise<void> {
+  if (isDurableRunQueueConfigured()) {
+    await enqueueRun({ runId, payload, repositories, enqueuedAt: new Date().toISOString() });
+    return;
+  }
   if (activeRuns.has(runId)) return;
   const controller = new AbortController();
   activeRuns.set(runId, { controller, payload, repositories });
@@ -23,6 +28,27 @@ export function queueRun(runId: string, payload: RunCreatePayload, repositories:
       activeRuns.delete(runId);
     });
   }, 0);
+}
+
+export async function processNextQueuedRun(): Promise<boolean> {
+  const job = await claimRun();
+  if (!job) return false;
+
+  const controller = new AbortController();
+  try {
+    await executeRun(job.runId, job.payload, job.repositories, controller);
+    await acknowledgeRun(job);
+  } catch (error) {
+    await getRunStore().updateRun(job.runId, {
+      status: 'failed',
+      completedAt: new Date().toISOString(),
+      errorCode: 'WorkerFailed',
+      errorMessage: redactSecrets(error instanceof Error ? error.message : String(error)),
+    });
+    await emitRunEvent(job.runId, 'run.failed', 'Durable worker failed before acknowledging the job.');
+    throw error;
+  }
+  return true;
 }
 
 export function requestRunCancellation(runId: string): boolean {
