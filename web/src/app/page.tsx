@@ -465,15 +465,20 @@ export default function Home() {
   const [logActionStatus, setLogActionStatus] = useState('');
   const [runCacheStatus, setRunCacheStatus] = useState('');
   const logsEndRef = useRef<HTMLDivElement>(null);
+  const activeWatcherRef = useRef<string | null>(null);
 
   const addLog = useCallback((msg: string) => {
     setLogs((prev) => {
+      if (isRoutineLogLine(msg) && prev.slice(-8).includes(msg)) return prev;
       setTimeout(() => logsEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 0);
       return [...prev, msg];
     });
   }, []);
 
   const watchRun = useCallback(async (runId: string, initialEventSequence = 0) => {
+    if (activeWatcherRef.current === runId) return;
+    activeWatcherRef.current = runId;
+
     return new Promise<void>((resolve) => {
       const events = new EventSource(`/api/runs/${runId}/events`);
       let settled = false;
@@ -485,6 +490,7 @@ export default function Home() {
         settled = true;
         if (pollTimer) clearInterval(pollTimer);
         events.close();
+        if (activeWatcherRef.current === runId) activeWatcherRef.current = null;
         resolve();
       };
 

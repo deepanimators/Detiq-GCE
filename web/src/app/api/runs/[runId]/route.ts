@@ -7,6 +7,9 @@ import type { RunEvent } from '@/lib/runs/types';
 export const runtime = 'nodejs';
 export const maxDuration = 300;
 
+const WORKER_NUDGE_COOLDOWN_MS = 60_000;
+const queuedWorkerNudges = new Map<string, number>();
+
 export async function GET(
   _req: Request,
   context: { params: Promise<{ runId: string }> }
@@ -14,21 +17,26 @@ export async function GET(
   const { runId } = await context.params;
   const stored = await getRunStore().getRun(runId);
   if (!stored) return Response.json({ error: 'Run not found' }, { status: 404 });
-  if (stored.run.status === 'queued' && shouldNudgeQueuedWorker(stored.events)) {
+  if (stored.run.status === 'queued' && shouldNudgeQueuedWorker(runId, stored.events)) {
     nudgeQueuedWorker(runId);
   }
   return Response.json(stored);
 }
 
-function shouldNudgeQueuedWorker(events: RunEvent[]): boolean {
+function shouldNudgeQueuedWorker(runId: string, events: RunEvent[]): boolean {
+  const latestInProcessNudge = queuedWorkerNudges.get(runId);
+  if (latestInProcessNudge && Date.now() - latestInProcessNudge < WORKER_NUDGE_COOLDOWN_MS) return false;
+
   const lastWorkerNudge = events.findLast((event) =>
     event.type === 'run.log' && event.message?.startsWith('[worker] Polling detected queued run')
   );
   if (!lastWorkerNudge) return true;
-  return Date.now() - Date.parse(lastWorkerNudge.createdAt) > 30_000;
+  return Date.now() - Date.parse(lastWorkerNudge.createdAt) > WORKER_NUDGE_COOLDOWN_MS;
 }
 
 function nudgeQueuedWorker(runId: string): void {
+  queuedWorkerNudges.set(runId, Date.now());
+  pruneQueuedWorkerNudges();
   after(async () => {
     try {
       await emitRunEvent(runId, 'run.log', '[worker] Polling detected queued run; dispatcher nudged.');
@@ -51,4 +59,11 @@ function nudgeQueuedWorker(runId: string): void {
       );
     }
   });
+}
+
+function pruneQueuedWorkerNudges(): void {
+  const oldestAllowed = Date.now() - WORKER_NUDGE_COOLDOWN_MS * 5;
+  for (const [runId, nudgedAt] of queuedWorkerNudges) {
+    if (nudgedAt < oldestAllowed) queuedWorkerNudges.delete(runId);
+  }
 }
