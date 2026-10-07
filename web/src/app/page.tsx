@@ -733,7 +733,12 @@ export default function Home() {
         }),
       });
       const body = await response.json();
-      if (!response.ok) throw new Error(body.error ?? `Repository lookup failed (${response.status})`);
+      if (!response.ok) {
+        const details = [body.error, body.hint, body.rateLimitResetAt ? `Rate-limit reset: ${body.rateLimitResetAt}` : null]
+          .filter(Boolean)
+          .join(' ');
+        throw new Error(details || `Repository lookup failed (${response.status})`);
+      }
       const next = body.repositories as RepositoryChoice[];
       setRepositories(next);
       setSelectedRepositories(new Set(next.map((repo) => repo.name)));

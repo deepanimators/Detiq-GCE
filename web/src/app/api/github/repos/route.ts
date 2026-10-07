@@ -39,6 +39,10 @@ export async function POST(req: Request) {
         error: formatGitHubError(error),
         code: details.status === 401 ? 'GITHUB_UNAUTHORIZED' : details.status === 403 ? 'GITHUB_FORBIDDEN' : 'GITHUB_REQUEST_FAILED',
         status: details.status,
+        hint: details.status === 403
+          ? 'For organization repositories, authorize the token for org SSO, grant private repository access, check fine-grained token repository selection, and wait for any rate-limit reset.'
+          : undefined,
+        rateLimitResetAt: details.rateLimitReset ? new Date(details.rateLimitReset * 1000).toISOString() : undefined,
         documentationUrl: details.documentationUrl,
       },
       { status: details.status && details.status >= 400 && details.status < 500 ? details.status : 502 }
