@@ -1,47 +1,19 @@
 import crypto from 'crypto';
+import { PutObjectCommand } from '@aws-sdk/client-s3';
 import type { QueuedRun } from './types';
-
-const QUEUE_NAME = 'runs';
-const PROCESSING_QUEUE_NAME = 'runs:processing';
+import {
+  deleteRunObject,
+  getRunObject,
+  getRunObjectStore,
+  listRunObjects,
+  putRunObject,
+} from './object-store';
 
 export class RunQueueConfigurationError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'RunQueueConfigurationError';
   }
-}
-
-type RedisValue = string | number | null;
-
-function redisConfig(): { url: string; token: string; prefix: string; key: string } {
-  const url = process.env.UPSTASH_REDIS_REST_URL;
-  const token = process.env.UPSTASH_REDIS_REST_TOKEN;
-  if (!url || !token) {
-    throw new RunQueueConfigurationError(
-      'Durable run queue is not configured. Set UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN.'
-    );
-  }
-  const prefix = process.env.RUN_STORE_KEY_PREFIX ?? 'detiq:runs';
-  return { url, token, prefix, key: `${prefix}:${QUEUE_NAME}` };
-}
-
-async function redisCommand(command: RedisValue[]): Promise<RedisValue> {
-  const { url, token } = redisConfig();
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${token}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(command),
-    cache: 'no-store',
-  });
-  if (!response.ok) {
-    throw new Error(`Run queue Redis request failed with HTTP ${response.status}.`);
-  }
-  const result = (await response.json()) as { result?: RedisValue; error?: string };
-  if (result.error) throw new Error(`Run queue Redis error: ${result.error}`);
-  return result.result ?? null;
 }
 
 function encryptionKey(): Buffer {
@@ -58,7 +30,11 @@ function encrypt(value: QueuedRun): string {
   const iv = crypto.randomBytes(12);
   const cipher = crypto.createCipheriv('aes-256-gcm', encryptionKey(), iv);
   const ciphertext = Buffer.concat([cipher.update(JSON.stringify(value), 'utf8'), cipher.final()]);
-  return [iv.toString('base64url'), cipher.getAuthTag().toString('base64url'), ciphertext.toString('base64url')].join('.');
+  return [
+    iv.toString('base64url'),
+    cipher.getAuthTag().toString('base64url'),
+    ciphertext.toString('base64url'),
+  ].join('.');
 }
 
 function decrypt(value: string): QueuedRun {
@@ -80,25 +56,53 @@ function decrypt(value: string): QueuedRun {
 
 export function isDurableRunQueueConfigured(): boolean {
   return Boolean(
-    process.env.UPSTASH_REDIS_REST_URL &&
-      process.env.UPSTASH_REDIS_REST_TOKEN &&
-      process.env.RUN_QUEUE_ENCRYPTION_KEY
+    process.env.RUN_QUEUE_ENCRYPTION_KEY &&
+      (process.env.R2_BUCKET || process.env.S3_BUCKET)
   );
 }
 
 export async function enqueueRun(job: QueuedRun): Promise<void> {
-  const { key } = redisConfig();
-  await redisCommand(['LPUSH', key, encrypt(job)]);
+  await putRunObject(`queue/queued/${job.runId}.json`, encrypt(job));
 }
 
 export async function claimRun(): Promise<{ job: QueuedRun; token: string } | null> {
-  const { prefix, key } = redisConfig();
-  const processingKey = `${prefix}:${PROCESSING_QUEUE_NAME}`;
-  const value = await redisCommand(['RPOPLPUSH', key, processingKey]);
-  return typeof value === 'string' ? { job: decrypt(value), token: value } : null;
+  const queued = await listRunObjects('queue/queued/');
+  for (const token of queued) {
+    const runId = token.split('/').at(-1)?.replace(/\.json$/, '');
+    if (!runId) continue;
+    const claimKey = `queue/claimed/${runId}.json`;
+
+    try {
+      const store = getRunObjectStore();
+      await store.client.send(new PutObjectCommand({
+        Bucket: store.bucket,
+        Key: `${store.prefix}/${claimKey}`,
+        Body: new Date().toISOString(),
+        ContentType: 'text/plain',
+        IfNoneMatch: '*',
+      }));
+      const value = await getRunObject(token);
+      if (!value) {
+        await deleteRunObject(claimKey);
+        continue;
+      }
+      return { job: decrypt(value), token };
+    } catch (error) {
+      if (isAlreadyClaimed(error)) continue;
+      throw error;
+    }
+  }
+  return null;
 }
 
 export async function acknowledgeRun(token: string): Promise<void> {
-  const { prefix } = redisConfig();
-  await redisCommand(['LREM', `${prefix}:${PROCESSING_QUEUE_NAME}`, '1', token]);
+  const runId = token.split('/').at(-1)?.replace(/\.json$/, '');
+  if (!runId) throw new Error('Invalid queued run token.');
+  await deleteRunObject(token);
+  await deleteRunObject(`queue/claimed/${runId}.json`);
+}
+
+function isAlreadyClaimed(error: unknown): boolean {
+  const value = error as { $metadata?: { httpStatusCode?: number }; name?: string };
+  return value.$metadata?.httpStatusCode === 412 || value.name === 'PreconditionFailed';
 }

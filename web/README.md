@@ -25,12 +25,11 @@ Current API surface:
 - `POST /api/runs/{runId}/cancel` requests cancellation for active runs.
 
 By default, local run state is written to `.detiq-runs/`. Set `RUN_STATE_DIR` to move
-it elsewhere. Vercel deployments must configure `UPSTASH_REDIS_REST_URL` and
-`UPSTASH_REDIS_REST_TOKEN`; the application refuses to use the read-only deployment
-filesystem and returns `RUN_STORE_NOT_CONFIGURED` when those variables are missing.
-The Redis REST store is the production implementation of the durable run-state
-boundary. The in-process worker still requires a durable queue/worker runtime for
-multi-instance execution; until that is deployed, use it only for small runs.
+it elsewhere. Vercel deployments use the configured S3-compatible destination
+(Cloudflare R2 or Amazon S3) for run records and queued jobs, so no Redis service is
+required. Configure the matching `R2_*` or `S3_*` variables and
+`RUN_QUEUE_ENCRYPTION_KEY`. The worker endpoint still requires an external scheduler
+or worker runtime to process queued objects.
 
 Credentials are intentionally not persisted in run state. The in-process worker keeps
 submitted credentials only in memory long enough to execute the run. Production should

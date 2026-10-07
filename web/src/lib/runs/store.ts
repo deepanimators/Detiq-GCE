@@ -1,6 +1,7 @@
 import { mkdir, readFile, rename, writeFile } from 'fs/promises';
 import path from 'path';
 import type { BackupRunRecord, RunEvent, RunEventType, StoredRun } from './types';
+import { getRunObjectStore, getRunObject, putRunObject } from './object-store';
 
 export type RunUpdate = Partial<Omit<BackupRunRecord, 'id' | 'createdAt' | 'config'>>;
 
@@ -193,27 +194,70 @@ class RedisRunStore implements RunStore {
   }
 }
 
+class ObjectRunStore implements RunStore {
+  async createRun(run: BackupRunRecord): Promise<BackupRunRecord> {
+    await this.write(run.id, { run, events: [] });
+    return run;
+  }
+
+  async getRun(runId: string): Promise<StoredRun | null> {
+    const raw = await getRunObject(`runs/${safeRunId(runId)}.json`);
+    return raw ? JSON.parse(raw) as StoredRun : null;
+  }
+
+  async updateRun(runId: string, patch: RunUpdate): Promise<BackupRunRecord> {
+    const stored = await this.requireRun(runId);
+    stored.run = { ...stored.run, ...patch };
+    await this.write(runId, stored);
+    return stored.run;
+  }
+
+  async appendEvent(
+    runId: string,
+    event: Omit<RunEvent, 'id' | 'runId' | 'sequence' | 'createdAt'>
+  ): Promise<RunEvent> {
+    const stored = await this.requireRun(runId);
+    const next: RunEvent = {
+      ...event,
+      id: crypto.randomUUID(),
+      runId,
+      sequence: (stored.events.at(-1)?.sequence ?? 0) + 1,
+      createdAt: new Date().toISOString(),
+    };
+    stored.events.push(next);
+    await this.write(runId, stored);
+    return next;
+  }
+
+  async getEvents(runId: string, afterSequence = 0): Promise<RunEvent[]> {
+    const stored = await this.getRun(runId);
+    return stored?.events.filter((event) => event.sequence > afterSequence) ?? [];
+  }
+
+  private async requireRun(runId: string): Promise<StoredRun> {
+    const stored = await this.getRun(runId);
+    if (!stored) throw new Error(`Run not found: ${runId}`);
+    return stored;
+  }
+
+  private async write(runId: string, stored: StoredRun): Promise<void> {
+    await putRunObject(`runs/${safeRunId(runId)}.json`, JSON.stringify(stored));
+  }
+}
+
 let singleton: RunStore | null = null;
 
 export function getRunStore(): RunStore {
   if (singleton) return singleton;
 
-  const redisUrl = process.env.UPSTASH_REDIS_REST_URL;
-  const redisToken = process.env.UPSTASH_REDIS_REST_TOKEN;
-  if (redisUrl || redisToken) {
-    if (!redisUrl || !redisToken) {
-      throw new RunStoreConfigurationError(
-        'Both UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN are required.'
-      );
-    }
-    singleton = new RedisRunStore(redisUrl, redisToken, process.env.RUN_STORE_KEY_PREFIX);
-    return singleton;
-  }
-
   if (process.env.VERCEL === '1') {
-    throw new RunStoreConfigurationError(
-      'Durable run storage is not configured. Set UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN in Vercel.'
-    );
+    try {
+      getRunObjectStore();
+    } catch (error) {
+      throw new RunStoreConfigurationError(error instanceof Error ? error.message : String(error));
+    }
+    singleton = new ObjectRunStore();
+    return singleton;
   }
 
   singleton = new FileRunStore(process.env.RUN_STATE_DIR ?? path.join(process.cwd(), '.detiq-runs'));
