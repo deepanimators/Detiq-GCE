@@ -18,6 +18,7 @@ type ActiveRun = {
   repositories: Repo[];
 };
 
+const TERMINAL_STATUSES = new Set(['preflight_failed', 'completed', 'partial', 'failed', 'cancelled']);
 const activeRuns = new Map<string, ActiveRun>();
 
 export async function queueRun(runId: string, payload: RunCreatePayload, repositories: Repo[]): Promise<void> {
@@ -41,6 +42,13 @@ export async function processNextQueuedRun(): Promise<boolean> {
   const { job, token } = claimed;
 
   const controller = new AbortController();
+  const stored = await getRunStore().getRun(job.runId);
+  if (!stored || TERMINAL_STATUSES.has(stored.run.status)) {
+    await acknowledgeRun(token);
+    return true;
+  }
+
+  activeRuns.set(job.runId, { controller, payload: job.payload, repositories: job.repositories });
   try {
     await executeRun(job.runId, job.payload, job.repositories, controller);
     await acknowledgeRun(token);
@@ -52,7 +60,10 @@ export async function processNextQueuedRun(): Promise<boolean> {
       errorMessage: redactSecrets(error instanceof Error ? error.message : String(error)),
     });
     await emitRunEvent(job.runId, 'run.failed', 'Durable worker failed before acknowledging the job.');
+    await acknowledgeRun(token);
     throw error;
+  } finally {
+    activeRuns.delete(job.runId);
   }
   return true;
 }

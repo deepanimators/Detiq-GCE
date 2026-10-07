@@ -5,15 +5,20 @@ export const runtime = 'nodejs';
 export const maxDuration = 300;
 
 function authorized(req: Request): boolean {
-  const expected = normalizeSecret(process.env.WORKER_SECRET ?? process.env.CRON_SECRET);
+  const expectedSecrets = [process.env.WORKER_SECRET, process.env.CRON_SECRET]
+    .map(normalizeSecret)
+    .filter(Boolean);
   const supplied =
     req.headers.get('x-cron-secret') ??
     req.headers.get('x-worker-secret') ??
     req.headers.get('authorization')?.replace(/^Bearer\s+/i, '') ??
     '';
   const normalizedSupplied = normalizeSecret(supplied);
-  if (!expected || normalizedSupplied.length !== expected.length) return false;
-  return crypto.timingSafeEqual(Buffer.from(normalizedSupplied), Buffer.from(expected));
+  if (!normalizedSupplied || !expectedSecrets.length) return false;
+  return expectedSecrets.some((expected) => {
+    if (normalizedSupplied.length !== expected.length) return false;
+    return crypto.timingSafeEqual(Buffer.from(normalizedSupplied), Buffer.from(expected));
+  });
 }
 
 function normalizeSecret(value: string | undefined): string {

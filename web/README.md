@@ -21,13 +21,14 @@ Current API surface:
 - `POST /api/preflight` validates GitHub source access and destination writability.
 - `POST /api/github/repos` fetches filtered repository metadata for the source
   selector without creating a run.
-- `POST /api/runs` creates a durable run record, executes preflight, and queues work.
+- `POST /api/runs` creates a durable run record, executes preflight, queues work,
+  and asks the platform worker to start after the response is sent.
 - `GET /api/runs/{runId}` returns run state and event history.
 - `GET /api/runs/{runId}/events` streams replayable SSE events from a cursor.
 - `POST /api/runs/{runId}/cancel` requests cancellation for active runs.
-- `GET` or `POST /api/worker` claims and processes one queued run when called with
-  `WORKER_SECRET` or `CRON_SECRET` as `x-worker-secret`, `x-cron-secret`, or Bearer
-  auth.
+- `GET` or `POST /api/worker` is an internal platform endpoint that claims and
+  processes one queued run. It accepts `CRON_SECRET` or `WORKER_SECRET` as
+  `x-cron-secret`, `x-worker-secret`, or Bearer auth.
 - `POST /api/cron` requires `targetType` and `targetName` in the authenticated
   request body; the target is supplied by the caller rather than hardcoded in
   deployment environment variables.
@@ -35,15 +36,15 @@ Current API surface:
 By default, local run state is written to `.detiq-runs/`. Set `RUN_STATE_DIR` to move
 it elsewhere. Vercel deployments use the configured S3-compatible destination
 (Cloudflare R2 or Amazon S3) for run records and queued jobs, so no Redis service is
-required. Configure the matching `R2_*` or `S3_*` variables and
-`RUN_QUEUE_ENCRYPTION_KEY`. The `/api/worker` endpoint must be invoked by an
-external scheduler or worker runtime with `WORKER_SECRET` or `CRON_SECRET` (for
-example, cronjobs.org or a private worker). It claims one encrypted queue object
-per invocation, so `POST /api/runs` returns immediately and long-running extraction
-is not tied to the run-creation request lifecycle. Vercel deployments never process
-runs inline; every run remains queued until `/api/worker` is invoked. The UI worker
-control can manually invoke the same endpoint for a stuck queued run.
-`DIRECT_RUN_REPO_LIMIT` only applies to non-Vercel local development.
+required. Configure the matching `R2_*` or `S3_*` variables,
+`RUN_QUEUE_ENCRYPTION_KEY`, and `CRON_SECRET` in Vercel. The committed
+`vercel.json` invokes `/api/worker` every minute; Vercel sends `CRON_SECRET` as a
+Bearer token for those cron calls. `POST /api/runs` also schedules a best-effort
+post-response worker dispatch, so users do not need to know or enter any platform
+secret. `WORKER_SECRET` is optional for non-Vercel external worker runtimes.
+Queue claims use a lease (`RUN_QUEUE_LEASE_SECONDS`, default 900) so abandoned
+claims can be reclaimed by a later worker. `DIRECT_RUN_REPO_LIMIT` only applies to
+non-Vercel local development.
 
 Credentials are intentionally not persisted in run state. The in-process worker keeps
 submitted credentials only in memory long enough to execute the run. Production should

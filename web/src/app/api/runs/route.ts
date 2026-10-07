@@ -1,3 +1,4 @@
+import { after } from 'next/server';
 import { runPreflight } from '@/lib/preflight';
 import { adapterNamesFromConfig, parseRunCreatePayload } from '@/lib/runs/request';
 import {
@@ -8,7 +9,7 @@ import {
 } from '@/lib/runs/store';
 import { RunObjectStoreConfigurationError } from '@/lib/runs/object-store';
 import { RunQueueConfigurationError } from '@/lib/runs/queue';
-import { queueRun } from '@/lib/runs/worker';
+import { processNextQueuedRun, queueRun } from '@/lib/runs/worker';
 import { formatGitHubError, getGitHubErrorDetails } from '@/lib/github';
 
 export const runtime = 'nodejs';
@@ -60,6 +61,7 @@ export async function POST(req: Request) {
 
     await emitRunEvent(run.id, 'run.queued', `Run queued with ${repositories.length} repositories.`);
     await queueRun(run.id, payload, repositories);
+    dispatchWorkerAfterResponse();
 
     const stored = await store.getRun(run.id);
     return Response.json({ run: stored?.run ?? run, preflight: preflightResponse }, { status: 202 });
@@ -95,4 +97,14 @@ export async function POST(req: Request) {
       { status: 400 }
     );
   }
+}
+
+function dispatchWorkerAfterResponse(): void {
+  after(async () => {
+    try {
+      await processNextQueuedRun();
+    } catch (error) {
+      console.error('Post-response worker dispatch failed', error);
+    }
+  });
 }

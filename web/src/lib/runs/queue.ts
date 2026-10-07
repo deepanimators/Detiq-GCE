@@ -9,6 +9,11 @@ import {
   putRunObject,
 } from './object-store';
 
+type ClaimLease = {
+  claimedAt: string;
+  leaseExpiresAt: string;
+};
+
 export class RunQueueConfigurationError extends Error {
   constructor(message: string) {
     super(message);
@@ -73,12 +78,17 @@ export async function claimRun(): Promise<{ job: QueuedRun; token: string } | nu
     const claimKey = `queue/claimed/${runId}.json`;
 
     try {
+      await deleteExpiredClaim(claimKey);
       const store = getRunObjectStore();
+      const now = Date.now();
       await store.client.send(new PutObjectCommand({
         Bucket: store.bucket,
         Key: `${store.prefix}/${claimKey}`,
-        Body: new Date().toISOString(),
-        ContentType: 'text/plain',
+        Body: JSON.stringify({
+          claimedAt: new Date(now).toISOString(),
+          leaseExpiresAt: new Date(now + claimLeaseMs()).toISOString(),
+        } satisfies ClaimLease),
+        ContentType: 'application/json',
         IfNoneMatch: '*',
       }));
       const value = await getRunObject(token);
@@ -100,6 +110,28 @@ export async function acknowledgeRun(token: string): Promise<void> {
   if (!runId) throw new Error('Invalid queued run token.');
   await deleteRunObject(token);
   await deleteRunObject(`queue/claimed/${runId}.json`);
+}
+
+async function deleteExpiredClaim(claimKey: string): Promise<void> {
+  const raw = await getRunObject(claimKey);
+  if (!raw) return;
+
+  try {
+    const lease = JSON.parse(raw) as Partial<ClaimLease>;
+    if (!lease.leaseExpiresAt || Date.parse(lease.leaseExpiresAt) > Date.now()) return;
+  } catch {
+    return;
+  }
+
+  await deleteRunObject(claimKey);
+}
+
+function claimLeaseMs(): number {
+  const configuredSeconds = Number(process.env.RUN_QUEUE_LEASE_SECONDS ?? 900);
+  const seconds = Number.isFinite(configuredSeconds) && configuredSeconds > 0
+    ? configuredSeconds
+    : 900;
+  return seconds * 1000;
 }
 
 function isAlreadyClaimed(error: unknown): boolean {
