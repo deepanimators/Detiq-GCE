@@ -1,6 +1,7 @@
 export interface StorageAdapter {
   readonly name: string;
   upload(storagePath: string, content: Buffer, contentType: string): Promise<void>;
+  uploadStream?(storagePath: string, stream: AsyncIterable<Buffer> | NodeJS.ReadableStream, contentType: string): Promise<{ size: number, sha256: string }>;
 }
 
 export type StorageErrorCategory =
@@ -64,7 +65,6 @@ export interface DurableStorageAdapter extends StorageAdapter {
   head(storagePath: string): Promise<StorageHeadResult>;
   download?(storagePath: string): Promise<{ content: Buffer, etag?: string }>;
   uploadOptimistic?(storagePath: string, content: Buffer, contentType: string, ifMatchEtag?: string): Promise<{ etag: string }>;
-  uploadStream?(storagePath: string, stream: AsyncIterable<Buffer> | NodeJS.ReadableStream, contentType: string): Promise<{ size: number, sha256: string }>;
   verify(storagePath: string, sha256: string): Promise<void>;
   delete?(storagePath: string): Promise<void>;
 }
