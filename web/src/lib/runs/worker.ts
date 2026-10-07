@@ -3,7 +3,13 @@ import { runExtraction } from '@/lib/extractor';
 import { redactSecrets } from '@/lib/adapters/base';
 import type { Repo } from '@/lib/github';
 import { emitRunEvent, getRunStore } from './store';
-import { acknowledgeRun, claimRun, enqueueRun, isDurableRunQueueConfigured } from './queue';
+import {
+  acknowledgeRun,
+  claimRun,
+  enqueueRun,
+  isDurableRunQueueConfigured,
+  RunQueueConfigurationError,
+} from './queue';
 import type { QueuedRun, RunCreatePayload } from './types';
 
 type ActiveRun = {
@@ -15,22 +21,18 @@ type ActiveRun = {
 const activeRuns = new Map<string, ActiveRun>();
 
 export async function queueRun(runId: string, payload: RunCreatePayload, repositories: Repo[]): Promise<void> {
-  if (isDurableRunQueueConfigured()) {
-    await enqueueRun({ runId, payload, repositories, enqueuedAt: new Date().toISOString() });
-    if (repositories.length <= Number(process.env.DIRECT_RUN_REPO_LIMIT ?? 10)) {
-      await processNextQueuedRun();
-    }
-    return;
+  if (!isDurableRunQueueConfigured()) {
+    throw new RunQueueConfigurationError(
+      'Durable run queue is not configured. Set R2/S3 storage and RUN_QUEUE_ENCRYPTION_KEY before creating a run.'
+    );
   }
-  if (activeRuns.has(runId)) return;
-  const controller = new AbortController();
-  activeRuns.set(runId, { controller, payload, repositories });
 
-  setTimeout(() => {
-    void executeRun(runId, payload, repositories, controller).finally(() => {
-      activeRuns.delete(runId);
-    });
-  }, 0);
+  await enqueueRun({ runId, payload, repositories, enqueuedAt: new Date().toISOString() });
+
+  const directLimit = Number(process.env.DIRECT_RUN_REPO_LIMIT ?? 0);
+  if (process.env.VERCEL !== '1' && directLimit > 0 && repositories.length <= directLimit) {
+    await processNextQueuedRun();
+  }
 }
 
 export async function processNextQueuedRun(): Promise<boolean> {

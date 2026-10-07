@@ -5,13 +5,18 @@ export const runtime = 'nodejs';
 export const maxDuration = 300;
 
 function authorized(req: Request): boolean {
-  const expected = process.env.CRON_SECRET;
+  const expected = normalizeSecret(process.env.CRON_SECRET);
   const supplied =
     req.headers.get('x-cron-secret') ??
     req.headers.get('authorization')?.replace(/^Bearer\s+/i, '') ??
     '';
-  if (!expected || supplied.length !== expected.length) return false;
-  return crypto.timingSafeEqual(Buffer.from(supplied), Buffer.from(expected));
+  const normalizedSupplied = normalizeSecret(supplied);
+  if (!expected || normalizedSupplied.length !== expected.length) return false;
+  return crypto.timingSafeEqual(Buffer.from(normalizedSupplied), Buffer.from(expected));
+}
+
+function normalizeSecret(value: string | undefined): string {
+  return (value ?? '').trim().replace(/^(['"])(.*)\1$/, '$2');
 }
 
 async function handleWorkerRequest(req: Request): Promise<Response> {

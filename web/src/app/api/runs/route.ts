@@ -7,6 +7,7 @@ import {
   RunStoreConfigurationError,
 } from '@/lib/runs/store';
 import { RunObjectStoreConfigurationError } from '@/lib/runs/object-store';
+import { RunQueueConfigurationError } from '@/lib/runs/queue';
 import { queueRun } from '@/lib/runs/worker';
 
 export const runtime = 'nodejs';
@@ -62,13 +63,19 @@ export async function POST(req: Request) {
     const stored = await store.getRun(run.id);
     return Response.json({ run: stored?.run ?? run, preflight: preflightResponse }, { status: 202 });
   } catch (error) {
-    if (error instanceof RunStoreConfigurationError || error instanceof RunObjectStoreConfigurationError) {
+    if (
+      error instanceof RunStoreConfigurationError ||
+      error instanceof RunObjectStoreConfigurationError ||
+      error instanceof RunQueueConfigurationError
+    ) {
       return Response.json(
         {
           error: {
             code: error instanceof RunObjectStoreConfigurationError
               ? 'RUN_STORAGE_BUCKET_NOT_FOUND'
-              : 'RUN_STORE_NOT_CONFIGURED',
+              : error instanceof RunQueueConfigurationError
+                ? 'RUN_QUEUE_NOT_CONFIGURED'
+                : 'RUN_STORE_NOT_CONFIGURED',
             message: error.message,
           },
         },
