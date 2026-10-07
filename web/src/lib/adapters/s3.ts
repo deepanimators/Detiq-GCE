@@ -7,6 +7,7 @@ import {
   PutObjectCommand,
   S3Client,
 } from '@aws-sdk/client-s3';
+import { Upload } from '@aws-sdk/lib-storage';
 import { createHash } from 'crypto';
 import {
   normalizeStorageError,
@@ -36,6 +37,72 @@ export class S3Adapter implements DurableStorageAdapter {
       }));
     } catch (error) {
       throw normalizeStorageError(error, this.name, 'upload');
+    }
+  }
+
+  async uploadOptimistic(storagePath: string, content: Buffer, contentType: string, ifMatchEtag?: string): Promise<{ etag: string }> {
+    try {
+      const result = await this.client.send(new PutObjectCommand({
+        Bucket: this.bucket, Key: storagePath, Body: content, ContentType: contentType,
+        IfMatch: ifMatchEtag,
+      }));
+      return { etag: result.ETag! };
+    } catch (error) {
+      const err = error as any;
+      if (err.name === 'PreconditionFailed' || err.$metadata?.httpStatusCode === 412) {
+        throw new Error(`OptimisticLockingFailed: The ETag did not match for ${storagePath}`);
+      }
+      throw normalizeStorageError(error, this.name, 'uploadOptimistic');
+    }
+  }
+
+  async uploadStream(storagePath: string, stream: NodeJS.ReadableStream | AsyncIterable<Buffer>, contentType: string): Promise<{ size: number, sha256: string }> {
+    try {
+      let size = 0;
+      const hash = createHash('sha256');
+      
+      // We must tee or intercept the stream to calculate sha256 and size
+      const passThrough = new (require('stream').PassThrough)();
+      
+      const pump = async () => {
+        for await (const chunk of stream) {
+          size += chunk.length;
+          hash.update(chunk);
+          if (!passThrough.write(chunk)) {
+            await new Promise(r => passThrough.once('drain', r));
+          }
+        }
+        passThrough.end();
+      };
+      
+      const upload = new Upload({
+        client: this.client,
+        params: {
+          Bucket: this.bucket,
+          Key: storagePath,
+          Body: passThrough,
+          ContentType: contentType,
+        },
+      });
+
+      const [res] = await Promise.all([upload.done(), pump()]);
+      return { size, sha256: hash.digest('hex') };
+    } catch (error) {
+      throw normalizeStorageError(error, this.name, 'uploadStream');
+    }
+  }
+
+  async download(storagePath: string): Promise<{ content: Buffer, etag?: string }> {
+    try {
+      const result = await this.client.send(new GetObjectCommand({ Bucket: this.bucket, Key: storagePath }));
+      const content = await bodyToBuffer(result.Body);
+      return { content, etag: result.ETag };
+    } catch (error) {
+      const err = error as any;
+      if (err.name === 'NoSuchKey' || err.$metadata?.httpStatusCode === 404) {
+        throw new Error(`NotFound: The key ${storagePath} does not exist`);
+      }
+      throw normalizeStorageError(error, this.name, 'download');
     }
   }
 

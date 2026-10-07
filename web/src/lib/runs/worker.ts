@@ -11,6 +11,7 @@ import {
   RunQueueConfigurationError,
 } from './queue';
 import type { RunCreatePayload } from './types';
+import { RepoJobQueue } from './job-queue';
 
 type ActiveRun = {
   controller: AbortController;
@@ -176,6 +177,14 @@ async function executeRun(
         .then(() => undefined);
     };
 
+    const workerId = process.env.VERCEL_URL || `worker-${Math.random().toString(36).substring(7)}`;
+    const jobQueue = new RepoJobQueue(runId);
+
+    // Enqueue jobs so they exist in the queue before we start trying to claim them.
+    for (const repo of chunk) {
+      await jobQueue.enqueue(`${repo.owner}-${repo.name}`);
+    }
+
     const extraction = runExtraction({
       pat: payload.pat,
       targetType: payload.targetType,
@@ -183,6 +192,8 @@ async function executeRun(
       adapters,
       repositories: chunk,
       ...payload.options,
+      jobQueue,
+      workerId,
       onLog: emitLog,
       onRepoComplete: (summary) => {
         void store.updateRun(runId, {

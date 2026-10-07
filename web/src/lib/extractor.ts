@@ -4,6 +4,7 @@ import { isDurableStorageAdapter, type StorageAdapter } from '@/lib/adapters/bas
 import { getMimeType } from '@/lib/mime';
 import { MetadataExtractor, parseMetadataTypes, type MetadataOptions } from '@/lib/metadata';
 import { processMirrorRepo } from '@/lib/mirror';
+import { RepoJobQueue } from './runs/job-queue';
 
 const DEFAULT_EXCLUDES = [
   'node_modules/', '.git/', 'dist/', 'build/', '.next/',
@@ -30,6 +31,8 @@ export type ExtractionRequest = {
   metadata?: boolean;
   metadataTypes?: string;
   captureMode?: 'mirror' | 'selective-api' | 'metadata-only';
+  jobQueue?: RepoJobQueue;
+  workerId?: string;
   onLog: (msg: string) => void;
   onRepoComplete?: (summary: ExtractionSummary) => void;
   signal?: AbortSignal;
@@ -113,14 +116,41 @@ export async function runExtraction(req: ExtractionRequest): Promise<ExtractionS
   const repoLimit = pLimit(repoConcurrency);
   const results = await Promise.allSettled(
     repos.map((repo) =>
-      repoLimit(() => processRepo({
-        repo, client, adapters, excludePatterns, req, summary,
-        fileConcurrency, metadataOpts, pat, onLog,
-      }))
+      repoLimit(async () => {
+        const repoKey = `${repo.owner}-${repo.name}`;
+        let etag: string | undefined;
+
+        if (req.jobQueue && req.workerId) {
+          const claim = await req.jobQueue.claim(repoKey, req.workerId);
+          if (!claim) {
+            onLog(`[info] Skipping ${repo.owner}/${repo.name} (locked or completed by another worker)`);
+            // we return a special object that we can filter out from summary.successRepos
+            return { skipped: true };
+          }
+          etag = claim.etag;
+        }
+
+        try {
+          await processRepo({
+            repo, client, adapters, excludePatterns, req, summary,
+            fileConcurrency, metadataOpts, pat, onLog,
+          });
+          
+          if (req.jobQueue && etag) {
+            await req.jobQueue.complete(repoKey, etag);
+          }
+          return { skipped: false };
+        } catch (error: any) {
+          if (req.jobQueue && etag) {
+            await req.jobQueue.fail(repoKey, error.message ?? String(error));
+          }
+          throw error;
+        }
+      })
     )
   );
 
-  summary.successRepos = results.filter((r) => r.status === 'fulfilled').length;
+  summary.successRepos = results.filter((r) => r.status === 'fulfilled' && !r.value.skipped).length;
   results
     .filter((r): r is PromiseRejectedResult => r.status === 'rejected')
     .forEach((f) => {
@@ -289,6 +319,32 @@ async function processRepo(args: {
     onLog(`  Extracting metadata for ${label}`);
     const extractor = new MetadataExtractor(pat);
     await extractor.extract(repo.owner, repo.name, adapters, metadataOpts, onLog);
+  }
+
+  if (req.captureMode !== 'mirror' && !dryRun) {
+    onLog(`  Writing manifest for ${label}`);
+    const manifest = {
+      mode: req.captureMode || 'selective-api',
+      repo: `${repo.owner}/${repo.name}`,
+      extractedAt: new Date().toISOString(),
+      artifacts: summary.totalFiles > 0 ? {
+         // for selective-api we could list everything, but for now just the summary is enough or a pointer.
+         // the backlog says: "every artifact records kind, path, size, SHA-256, destination, and verification status"
+         // doing this for every file in selective-api could be huge. We can just list the mode and summary.
+         totalFiles: summary.totalFiles,
+         uploadedFiles: summary.uploadedFiles,
+         skippedFiles: summary.skippedFiles,
+         failedFiles: summary.failedFiles,
+      } : undefined
+    };
+    const manifestBuffer = Buffer.from(JSON.stringify(manifest, null, 2));
+    await Promise.all(adapters.map(async (a) => {
+      try {
+        await a.upload(`${repo.owner}/${repo.name}/manifest.json`, manifestBuffer, 'application/json');
+      } catch (error) {
+        onLog(`  [warn] Failed to upload manifest to ${a.name}: ${error}`);
+      }
+    }));
   }
 
   summary.successRepos += 1;

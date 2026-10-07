@@ -81,14 +81,46 @@ export async function putRunObject(key: string, body: string): Promise<void> {
   }
 }
 
+export async function putRunObjectOptimistic(key: string, body: string, ifMatchEtag?: string): Promise<{ etag: string }> {
+  const store = getRunObjectStore();
+  try {
+    const command = new PutObjectCommand({
+      Bucket: store.bucket,
+      Key: `${store.prefix}/${key}`,
+      Body: body,
+      ContentType: 'application/json',
+      IfMatch: ifMatchEtag,
+    });
+    // For create only (fail if exists) we could use IfNoneMatch: '*'
+    if (ifMatchEtag === '') {
+      delete command.input.IfMatch;
+      command.input.IfNoneMatch = '*';
+    }
+
+    const result = await store.client.send(command);
+    return { etag: result.ETag! };
+  } catch (error) {
+    const err = error as any;
+    if (err.name === 'PreconditionFailed' || err.$metadata?.httpStatusCode === 412) {
+      throw new Error(`OptimisticLockingFailed: The ETag did not match for ${key}`);
+    }
+    throw normalizeObjectStoreError(error, store.bucket);
+  }
+}
+
 export async function getRunObject(key: string): Promise<string | null> {
+  const res = await getRunObjectWithEtag(key);
+  return res ? res.body : null;
+}
+
+export async function getRunObjectWithEtag(key: string): Promise<{ body: string, etag: string } | null> {
   const store = getRunObjectStore();
   try {
     const result = await store.client.send(new GetObjectCommand({
       Bucket: store.bucket,
       Key: `${store.prefix}/${key}`,
     }));
-    return result.Body ? result.Body.transformToString() : null;
+    return result.Body && result.ETag ? { body: await result.Body.transformToString(), etag: result.ETag } : null;
   } catch (error) {
     if (isNotFound(error)) return null;
     throw error;

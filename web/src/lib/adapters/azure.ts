@@ -30,6 +30,76 @@ export class AzureAdapter implements DurableStorageAdapter {
     }
   }
 
+  async uploadOptimistic(storagePath: string, content: Buffer, contentType: string, ifMatchEtag?: string): Promise<{ etag: string }> {
+    try {
+      const cc = this.client.getContainerClient(this.container);
+      await cc.createIfNotExists();
+      const options: any = {
+        blobHTTPHeaders: { blobContentType: contentType },
+      };
+      if (ifMatchEtag) {
+        options.conditions = { ifMatch: ifMatchEtag };
+      } else if (ifMatchEtag === '') { // if match empty, fail if exists
+        options.conditions = { ifNoneMatch: '*' };
+      }
+      
+      const result = await cc.getBlockBlobClient(storagePath).upload(content, content.length, options);
+      return { etag: result.etag! };
+    } catch (error) {
+      const err = error as any;
+      if (err.statusCode === 412 || err.details?.errorCode === 'ConditionNotMet' || err.details?.errorCode === 'BlobAlreadyExists') {
+        throw new Error(`OptimisticLockingFailed: The ETag did not match for ${storagePath}`);
+      }
+      throw normalizeStorageError(error, this.name, 'uploadOptimistic');
+    }
+  }
+
+  async uploadStream(storagePath: string, stream: NodeJS.ReadableStream | AsyncIterable<Buffer>, contentType: string): Promise<{ size: number, sha256: string }> {
+    try {
+      const cc = this.client.getContainerClient(this.container);
+      await cc.createIfNotExists();
+      
+      let size = 0;
+      const hash = createHash('sha256');
+      const passThrough = new (require('stream').PassThrough)();
+      
+      const pump = async () => {
+        for await (const chunk of stream) {
+          size += chunk.length;
+          hash.update(chunk);
+          if (!passThrough.write(chunk)) {
+            await new Promise(r => passThrough.once('drain', r));
+          }
+        }
+        passThrough.end();
+      };
+      
+      const upload = cc.getBlockBlobClient(storagePath).uploadStream(passThrough, undefined, undefined, {
+        blobHTTPHeaders: { blobContentType: contentType }
+      });
+
+      await Promise.all([upload, pump()]);
+      return { size, sha256: hash.digest('hex') };
+    } catch (error) {
+      throw normalizeStorageError(error, this.name, 'uploadStream');
+    }
+  }
+
+  async download(storagePath: string): Promise<{ content: Buffer, etag?: string }> {
+    try {
+      const blob = this.client.getContainerClient(this.container).getBlockBlobClient(storagePath);
+      const props = await blob.getProperties();
+      const content = await blob.downloadToBuffer();
+      return { content, etag: props.etag };
+    } catch (error) {
+      const err = error as any;
+      if (err.statusCode === 404 || err.details?.errorCode === 'BlobNotFound') {
+        throw new Error(`NotFound: The key ${storagePath} does not exist`);
+      }
+      throw normalizeStorageError(error, this.name, 'download');
+    }
+  }
+
   async preflight(): Promise<StoragePreflightResult> {
     const key = `.detiq/preflight-${Date.now()}-${Math.random().toString(16).slice(2)}.txt`;
     try {

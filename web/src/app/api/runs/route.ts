@@ -124,7 +124,7 @@ function dispatchWorkerAfterResponse(runId: string): void {
           errorCode: 'WorkerDispatchFailed',
           errorMessage: message,
         });
-        await emitRunEvent(runId, 'run.failed', `Worker dispatch failed: ${message}`, {
+        await emitRunEvent(runId, 'run.failed', `Worker dispatch failed. Please contact platform administrator.`, {
           errorCode: 'WorkerDispatchFailed',
         });
       } catch (eventError) {

@@ -87,8 +87,14 @@ export async function processMirrorRepo(args: {
     for (const adapter of adapters) {
       const storageBase = `${repo.owner}/${repo.name}`;
       
-      const bundleBuffer = await fs.promises.readFile(bundlePath);
-      await adapter.upload(`${storageBase}/repository.bundle`, bundleBuffer, 'application/octet-stream');
+      if (adapter.uploadStream) {
+        const stream = require('fs').createReadStream(bundlePath);
+        const { size, sha256 } = await adapter.uploadStream(`${storageBase}/repository.bundle`, stream, 'application/octet-stream');
+        onLog(`  Streamed bundle: ${size} bytes, SHA-256: ${sha256}`);
+      } else {
+        const bundleBuffer = await fs.promises.readFile(bundlePath);
+        await adapter.upload(`${storageBase}/repository.bundle`, bundleBuffer, 'application/octet-stream');
+      }
       
       const refsBuffer = await fs.promises.readFile(refsPath);
       await adapter.upload(`${storageBase}/refs.json`, refsBuffer, 'application/json');
