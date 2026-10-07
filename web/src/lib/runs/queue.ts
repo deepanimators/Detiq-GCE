@@ -70,11 +70,15 @@ export async function enqueueRun(job: QueuedRun): Promise<void> {
   await putRunObject(`queue/queued/${job.runId}.json`, encrypt(job));
 }
 
-export async function claimRun(): Promise<{ job: QueuedRun; token: string } | null> {
-  const queued = await listRunObjects('queue/queued/');
+export async function claimRun(options: {
+  preferredRunId?: string;
+  exact?: boolean;
+} = {}): Promise<{ job: QueuedRun; token: string } | null> {
+  const queued = orderQueuedTokens(await listRunObjects('queue/queued/'), options.preferredRunId);
   for (const token of queued) {
     const runId = token.split('/').at(-1)?.replace(/\.json$/, '');
     if (!runId) continue;
+    if (options.exact && runId !== options.preferredRunId) continue;
     const claimKey = `queue/claimed/${runId}.json`;
 
     try {
@@ -103,6 +107,16 @@ export async function claimRun(): Promise<{ job: QueuedRun; token: string } | nu
     }
   }
   return null;
+}
+
+function orderQueuedTokens(tokens: string[], preferredRunId?: string): string[] {
+  if (!preferredRunId) return tokens;
+  return [...tokens].sort((a, b) => {
+    const aPreferred = a.endsWith(`/${preferredRunId}.json`);
+    const bPreferred = b.endsWith(`/${preferredRunId}.json`);
+    if (aPreferred === bPreferred) return 0;
+    return aPreferred ? -1 : 1;
+  });
 }
 
 export async function acknowledgeRun(token: string): Promise<void> {

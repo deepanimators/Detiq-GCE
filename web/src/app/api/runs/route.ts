@@ -104,13 +104,15 @@ function dispatchWorkerAfterResponse(runId: string): void {
   after(async () => {
     try {
       await emitRunEvent(runId, 'run.log', '[worker] Dispatcher started.');
-      const result = await processQueuedRuns();
+      const result = await processQueuedRuns({ preferredRunId: runId });
       const stored = await getRunStore().getRun(runId);
       if (stored?.run.status === 'queued') {
         await emitRunEvent(
           runId,
           'run.log',
-          `[worker] Dispatcher processed ${result.processed} queued job(s), but this run is still waiting. It will retry on the next platform trigger.`
+          result.preferredRunClaimed
+            ? `[worker] Dispatcher processed ${result.processed} queued job(s), but this run is still waiting. It will retry on the next platform trigger.`
+            : '[worker] Dispatcher could not claim this run yet. A previous worker lease may still be active; it will retry automatically.'
         );
       }
     } catch (error) {

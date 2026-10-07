@@ -73,15 +73,15 @@ function nudgeQueuedWorker(runId: string): void {
   after(async () => {
     try {
       await emitRunEvent(runId, 'run.log', '[worker] Polling detected queued run; dispatcher nudged.');
-      const result = await processQueuedRuns({ maxJobs: 3, maxRuntimeMs: 240_000 });
+      const result = await processQueuedRuns({ maxJobs: 1, maxRuntimeMs: 240_000, preferredRunId: runId });
       const stored = await getRunStore().getRun(runId);
       if (stored?.run.status === 'queued') {
         await emitRunEvent(
           runId,
           'run.log',
-          result.exhausted
-            ? '[worker] Poll nudge found no claimable queued job. A previous worker lease may still be active.'
-            : `[worker] Poll nudge processed ${result.processed} queued job(s), but this run is still waiting.`
+          result.preferredRunClaimed
+            ? `[worker] Poll nudge processed ${result.processed} queued job(s), but this run is still waiting.`
+            : '[worker] Poll nudge could not claim this run yet. A previous worker lease may still be active.'
         );
       }
     } catch (error) {

@@ -29,6 +29,7 @@ const activeRuns = new Map<string, ActiveRun>();
 export type WorkerBatchResult = {
   processed: number;
   exhausted: boolean;
+  preferredRunClaimed?: boolean;
 };
 
 export async function queueRun(runId: string, payload: RunCreatePayload, repositories: Repo[]): Promise<void> {
@@ -55,32 +56,38 @@ export async function queueRun(runId: string, payload: RunCreatePayload, reposit
 export async function processQueuedRuns(options: {
   maxJobs?: number;
   maxRuntimeMs?: number;
+  preferredRunId?: string;
 } = {}): Promise<WorkerBatchResult> {
   const defaultMaxJobs = isVercelRuntime() ? 1 : 5;
   const maxJobs = positiveInteger(options.maxJobs ?? Number(process.env.WORKER_BATCH_SIZE ?? defaultMaxJobs), defaultMaxJobs);
   const maxRuntimeMs = positiveInteger(options.maxRuntimeMs ?? Number(process.env.WORKER_BATCH_RUNTIME_MS ?? 270_000), 270_000);
   const deadline = Date.now() + maxRuntimeMs;
   let processed = 0;
+  let preferredRunClaimed = false;
 
   while (processed < maxJobs && Date.now() < deadline) {
-    const claimed = await processNextQueuedRun();
-    if (!claimed) return { processed, exhausted: true };
+    const preferredRunId = processed === 0 ? options.preferredRunId : undefined;
+    const claimed = await processNextQueuedRun(preferredRunId);
+    if (!claimed) return { processed, exhausted: true, preferredRunClaimed };
+    if (preferredRunId && claimed.runId === preferredRunId) preferredRunClaimed = true;
     processed += 1;
   }
 
-  return { processed, exhausted: false };
+  return { processed, exhausted: false, preferredRunClaimed };
 }
 
-export async function processNextQueuedRun(): Promise<boolean> {
-  const claimed = await claimRun();
-  if (!claimed) return false;
+export async function processNextQueuedRun(
+  preferredRunId?: string
+): Promise<{ runId: string } | null> {
+  const claimed = await claimRun(preferredRunId ? { preferredRunId, exact: true } : undefined);
+  if (!claimed) return null;
   const { job, token } = claimed;
 
   const controller = new AbortController();
   const stored = await getRunStore().getRun(job.runId);
   if (!stored || TERMINAL_STATUSES.has(stored.run.status)) {
     await acknowledgeRun(token);
-    return true;
+    return { runId: job.runId };
   }
 
   activeRuns.set(job.runId, { controller, payload: job.payload, repositories: job.repositories });
@@ -115,7 +122,7 @@ export async function processNextQueuedRun(): Promise<boolean> {
   } finally {
     activeRuns.delete(job.runId);
   }
-  return true;
+  return { runId: job.runId };
 }
 
 export function requestRunCancellation(runId: string): boolean {
