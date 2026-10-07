@@ -1100,7 +1100,7 @@ export default function Home() {
         </div>
 
         {/* ── Right: live log ────────────────────────────────────────────── */}
-        <div className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-800 flex flex-col sticky top-20" style={{ height: 'calc(100vh - 7rem)' }}>
+        <div className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-800 flex flex-col min-h-[24rem] xl:sticky xl:top-24 xl:h-[calc(100dvh-7rem)] xl:max-h-[calc(100dvh-7rem)] xl:min-h-0 xl:z-0 overflow-hidden">
           <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-3 border-b border-zinc-100 dark:border-zinc-800 flex-shrink-0">
             <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-50">Live Log</h2>
             <div className="flex flex-wrap items-center justify-end gap-2">
@@ -1214,7 +1214,7 @@ export default function Home() {
         </div>
       </main>
 
-      <footer className="max-w-6xl mx-auto px-6 py-4 text-xs text-zinc-400 border-t border-zinc-100 dark:border-zinc-800 mt-2">
+      <footer className="relative z-10 max-w-6xl mx-auto px-6 py-4 text-xs text-zinc-400 border-t border-zinc-100 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950 mt-2">
         Scheduled runs via{' '}
         <a href="https://cronjobs.org" className="underline hover:text-zinc-600">cronjobs.org</a>
         {' '}→ POST <code className="bg-zinc-100 dark:bg-zinc-800 px-1 rounded">/api/cron</code>
