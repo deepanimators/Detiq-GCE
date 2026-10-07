@@ -296,6 +296,7 @@ export default function Home() {
   const [repoSearch, setRepoSearch] = useState('');
   const [loadingRepositories, setLoadingRepositories] = useState(false);
   const [repositoryError, setRepositoryError] = useState('');
+  const [loadingBranches, setLoadingBranches] = useState<string | null>(null);
 
   // Filters
   const [skipForks, setSkipForks] = useState(false);
@@ -506,11 +507,33 @@ export default function Home() {
       const next = body.repositories as RepositoryChoice[];
       setRepositories(next);
       setSelectedRepositories(new Set(next.map((repo) => repo.name)));
-      setBranchOverrides({});
+      setBranchOverrides(Object.fromEntries(next.map((repo) => [repo.name, repo.defaultBranch])));
     } catch (error) {
       setRepositoryError(error instanceof Error ? error.message : String(error));
     } finally {
       setLoadingRepositories(false);
+    }
+
+    async function loadBranches(repo: RepositoryChoice) {
+      if (repo.branches?.length || loadingBranches) return;
+      setLoadingBranches(repo.name);
+      setRepositoryError('');
+      try {
+        const response = await fetch('/api/github/branches', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ pat, owner: repo.owner, repo: repo.name }),
+        });
+        const body = await response.json();
+        if (!response.ok) throw new Error(`${repo.name}: ${body.error ?? 'Unable to fetch branches'}`);
+        setRepositories((current) => current.map((item) => item.name === repo.name
+          ? { ...item, branches: body.branches as string[] }
+          : item));
+      } catch (error) {
+        setRepositoryError(error instanceof Error ? error.message : String(error));
+      } finally {
+        setLoadingBranches(null);
+      }
     }
   }
 
@@ -763,7 +786,13 @@ export default function Home() {
     setLogActionStatus('Log file downloaded.');
   }
 
-  const canRun = pat && targetName && (dryRun || countAdapters() > 0);
+  const canRun = Boolean(
+    pat &&
+    targetName &&
+    repositories.length > 0 &&
+    selectedRepositories.size > 0 &&
+    (dryRun || countAdapters() > 0)
+  );
   const actualError = summarizeActualError(logs, currentRun);
 
   return (
@@ -862,10 +891,14 @@ export default function Home() {
                         <p className="text-sm text-zinc-800 dark:text-zinc-200 truncate">{repo.name}</p>
                         <p className="text-[11px] text-zinc-400">{repo.isPrivate ? 'Private' : 'Public'} · default: {repo.defaultBranch}</p>
                       </div>
-                      <input className="w-32 px-2 py-1 text-xs rounded border border-zinc-200 dark:border-zinc-700 bg-transparent"
+                      <input list={`branches-${repo.name}`} className="w-36 px-2 py-1 text-xs rounded border border-zinc-200 dark:border-zinc-700 bg-transparent"
                         value={branchOverrides[repo.name] ?? repo.defaultBranch}
+                        onFocus={() => void loadBranches(repo)}
                         onChange={(event) => setBranchOverrides((current) => ({ ...current, [repo.name]: event.target.value }))}
                         aria-label={`Branch for ${repo.name}`} />
+                      <datalist id={`branches-${repo.name}`}>
+                        {(repo.branches ?? [repo.defaultBranch]).map((branch) => <option key={branch} value={branch} />)}
+                      </datalist>
                     </div>
                   ))}
                 </div>
@@ -1020,11 +1053,11 @@ export default function Home() {
 
           {!canRun && !running && (
             <p className="text-xs text-amber-600 dark:text-amber-400 px-1">
-              {!pat ? '→ Enter GitHub PAT' : !targetName ? '→ Enter org or username' : '→ Enable at least one storage target (or check Dry run)'}
+              {!pat ? '→ Enter GitHub PAT' : !targetName ? '→ Enter org or username' : !repositories.length ? '→ Fetch repositories first' : !selectedRepositories.size ? '→ Select at least one repository' : '→ Enable at least one storage target (or check Dry run)'}
             </p>
           )}
 
-          <Button onClick={startExtraction} disabled={running || !canRun} className="w-full h-10">
+          <Button onClick={startExtraction} disabled={running || Boolean(loadingBranches) || !canRun} className="w-full h-10">
             {running
               ? 'Run active...'
               : `Create Backup Run${countAdapters() > 1 ? ` → ${countAdapters()} targets` : ''}${metadataEnabled ? ' + metadata' : ''}`}
