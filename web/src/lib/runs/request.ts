@@ -67,6 +67,8 @@ function parseOptions(input: unknown): ExtractOptions {
     extraExcludes: asStringArray(source.extraExcludes),
     metadata: asBoolean(source.metadata),
     metadataTypes: asString(source.metadataTypes),
+    selectedRepositories: asStringArray(source.selectedRepositories),
+    branchOverrides: asStringRecord(source.branchOverrides),
   };
 }
 
@@ -92,4 +94,12 @@ function asStringArray(value: unknown): string[] | undefined {
   if (!Array.isArray(value)) return undefined;
   const strings = value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0);
   return strings.length ? strings.map((item) => item.trim()) : undefined;
+}
+
+function asStringRecord(value: unknown): Record<string, string> | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const entries = Object.entries(value).filter(
+    (entry): entry is [string, string] => typeof entry[0] === 'string' && typeof entry[1] === 'string' && Boolean(entry[1].trim())
+  );
+  return entries.length ? Object.fromEntries(entries) : undefined;
 }

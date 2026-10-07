@@ -36,13 +36,22 @@ export async function runPreflight(payload: RunCreatePayload): Promise<Preflight
   const repositories = payload.targetType === 'user'
     ? await client.listUserRepos(payload.targetName, listOpts)
     : await client.listOrgRepos(payload.targetName, listOpts);
+  const selected = payload.options.selectedRepositories;
+  const selectedSet = selected?.length ? new Set(selected) : null;
+  const filteredRepositories = selectedSet
+    ? repositories.filter((repo) => selectedSet.has(repo.name))
+    : repositories;
+  for (const repo of filteredRepositories) {
+    const override = payload.options.branchOverrides?.[repo.name];
+    if (override) repo.defaultBranch = override;
+  }
 
   const source: SourcePreflightResult = {
     ok: true,
     targetType: payload.targetType,
     targetName: payload.targetName,
-    repositoryCount: repositories.length,
-    message: `Found ${repositories.length} matching repositories.`,
+    repositoryCount: filteredRepositories.length,
+    message: `Found ${filteredRepositories.length} matching repositories.`,
   };
 
   const adapters = buildAdaptersFromConfig(payload.adapters);
@@ -57,7 +66,7 @@ export async function runPreflight(payload: RunCreatePayload): Promise<Preflight
       }));
 
   const warnings: string[] = [];
-  if (repositories.length >= LARGE_RUN_WARNING_REPO_COUNT) {
+  if (filteredRepositories.length >= LARGE_RUN_WARNING_REPO_COUNT) {
     warnings.push(
       `Large run warning: ${repositories.length} repositories should run as asynchronous worker jobs, not a single request.`
     );
@@ -73,7 +82,7 @@ export async function runPreflight(payload: RunCreatePayload): Promise<Preflight
     ok,
     source,
     adapters: adapterResults,
-    repositories,
+    repositories: filteredRepositories,
     warnings,
   };
 }

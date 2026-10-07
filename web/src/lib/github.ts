@@ -11,6 +11,7 @@ export type Repo = {
   isFork: boolean;
   isArchived: boolean;
   topics: string[];
+  branches?: string[];
 };
 
 export type ListRepoOptions = {
@@ -95,6 +96,20 @@ export class GitHubClient {
       { label: `getBranch ${owner}/${repo}` }
     );
     return data.commit.sha;
+  }
+
+  async listBranches(owner: string, repo: string): Promise<string[]> {
+    const branches: string[] = [];
+    let page = 1;
+    while (true) {
+      const { data } = await withRetry(
+        () => this.octokit.repos.listBranches({ owner, repo, per_page: 100, page }),
+        { label: `listBranches ${owner}/${repo} p${page}` }
+      );
+      branches.push(...data.map((branch) => branch.name));
+      if (data.length < 100) return branches;
+      page++;
+    }
   }
 
   async getChangedFiles(owner: string, repo: string, baseSha: string, headSha: string): Promise<string[]> {

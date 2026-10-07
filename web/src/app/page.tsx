@@ -14,6 +14,17 @@ type AdapterConfig = {
   azure?: { connectionString: string; container: string };
 };
 
+type RepositoryChoice = {
+  owner: string;
+  name: string;
+  defaultBranch: string;
+  isPrivate: boolean;
+  isFork: boolean;
+  isArchived: boolean;
+  topics: string[];
+  branches?: string[];
+};
+
 type Summary = {
   totalRepos: number; successRepos: number;
   totalFiles: number; uploadedFiles: number;
@@ -95,7 +106,92 @@ function Field({
       />
       {hint && <p className="text-xs text-zinc-400 mt-1">{hint}</p>}
     </div>
+
+    <div className="flex items-center justify-between gap-3 border-t border-zinc-100 dark:border-zinc-800 pt-3">
+      <div>
+        <p className="text-sm font-medium text-zinc-800 dark:text-zinc-200">Repository selection</p>
+        <p className="text-xs text-zinc-400">Fetch metadata, choose repositories, and select each branch before extraction.</p>
+      </div>
+      <button type="button" onClick={fetchRepositories}
+        className="px-3 py-2 text-xs rounded-lg border border-zinc-200 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+        disabled={!pat || !targetName || loadingRepositories}>
+        {loadingRepositories ? 'Fetching…' : 'Fetch repositories'}
+      </Button>
+    </div>
+    {repositoryError && <p role="alert" className="text-xs text-red-600">{repositoryError}</p>}
+    {repositories.length > 0 && (
+      <div className="space-y-2">
+        <div className="flex items-center justify-between gap-2">
+          <Field label="Search repositories" value={repoSearch} onChange={setRepoSearch} placeholder="Filter by name or topic" />
+          <span className="text-xs text-zinc-500 whitespace-nowrap">{selectedRepositories.size}/{repositories.length} selected</span>
+        </div>
+        <div className="max-h-72 overflow-auto rounded-lg border border-zinc-200 dark:border-zinc-700 divide-y divide-zinc-100 dark:divide-zinc-800">
+          {repositories
+            .filter((repo) => {
+              const query = repoSearch.toLowerCase();
+              return !query || repo.name.toLowerCase().includes(query) || repo.topics.some((topic) => topic.toLowerCase().includes(query));
+            })
+            .map((repo) => (
+              <div key={repo.name} className="flex items-center gap-3 px-3 py-2">
+                <input type="checkbox" checked={selectedRepositories.has(repo.name)}
+                  onChange={() => toggleRepository(repo.name)} aria-label={`Select ${repo.name}`} />
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm text-zinc-800 dark:text-zinc-200 truncate">{repo.name}</p>
+                  <p className="text-[11px] text-zinc-400">{repo.isPrivate ? 'Private' : 'Public'} · default: {repo.defaultBranch}</p>
+                </div>
+                <input
+                  className="w-32 px-2 py-1 text-xs rounded border border-zinc-200 dark:border-zinc-700 bg-transparent"
+                  value={branchOverrides[repo.name] ?? repo.defaultBranch}
+                  onChange={(event) => setBranchOverrides((current) => ({ ...current, [repo.name]: event.target.value }))}
+                  aria-label={`Branch for ${repo.name}`}
+                />
+              </div>
+            ))}
+        </div>
+      </div>
+    )}
   );
+}
+
+async function fetchRepositories() {
+  if (!pat || !targetName) return;
+  setLoadingRepositories(true);
+  setRepositoryError('');
+  try {
+    const response = await fetch('/api/github/repos', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        pat,
+        targetType,
+        targetName,
+        visibility,
+        skipForks,
+        skipArchived,
+        matchRegex: matchRegex || undefined,
+        topics: topics ? topics.split(',').map((topic) => topic.trim()).filter(Boolean) : undefined,
+      }),
+    });
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.error ?? `Repository lookup failed (${response.status})`);
+    const next = body.repositories as RepositoryChoice[];
+    setRepositories(next);
+    setSelectedRepositories(new Set(next.map((repo) => repo.name)));
+    setBranchOverrides({});
+  } catch (error) {
+    setRepositoryError(error instanceof Error ? error.message : String(error));
+  } finally {
+    setLoadingRepositories(false);
+  }
+}
+
+function toggleRepository(name: string) {
+  setSelectedRepositories((current) => {
+    const next = new Set(current);
+    if (next.has(name)) next.delete(name);
+    else next.add(name);
+    return next;
+  });
 }
 
 function Textarea({
@@ -279,6 +375,12 @@ export default function Home() {
   const [targetType, setTargetType] = useState<'user' | 'org'>('org');
   const [targetName, setTargetName] = useState('');
   const [visibility, setVisibility] = useState<'all' | 'public' | 'private'>('all');
+  const [repositories, setRepositories] = useState<RepositoryChoice[]>([]);
+  const [selectedRepositories, setSelectedRepositories] = useState<Set<string>>(new Set());
+  const [branchOverrides, setBranchOverrides] = useState<Record<string, string>>({});
+  const [repoSearch, setRepoSearch] = useState('');
+  const [loadingRepositories, setLoadingRepositories] = useState(false);
+  const [repositoryError, setRepositoryError] = useState('');
 
   // Filters
   const [skipForks, setSkipForks] = useState(false);
@@ -580,6 +682,8 @@ export default function Home() {
             metadataTypes: metadataEnabled && metadataTypes.size < METADATA_TYPES.length
               ? [...metadataTypes].join(',')
               : undefined,
+            selectedRepositories: repositories.length ? [...selectedRepositories] : undefined,
+            branchOverrides: repositories.length ? branchOverrides : undefined,
           },
         }),
       });

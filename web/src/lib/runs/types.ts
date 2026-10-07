@@ -46,6 +46,8 @@ export type ExtractOptions = {
   extraExcludes?: string[];
   metadata?: boolean;
   metadataTypes?: string;
+  selectedRepositories?: string[];
+  branchOverrides?: Record<string, string>;
 };
 
 export type RunCreatePayload = {

@@ -1,0 +1,35 @@
+import { GitHubClient, type ListRepoOptions } from '@/lib/github';
+
+export const runtime = 'nodejs';
+
+export async function POST(req: Request) {
+  try {
+    const body = await req.json() as Record<string, unknown>;
+    const pat = typeof body.pat === 'string' ? body.pat.trim() : '';
+    const targetName = typeof body.targetName === 'string' ? body.targetName.trim() : '';
+    const targetType = body.targetType === 'user' || body.targetType === 'org' ? body.targetType : null;
+    if (!pat || !targetName || !targetType) {
+      return Response.json({ error: 'pat, targetType, and targetName are required' }, { status: 400 });
+    }
+
+    const options: ListRepoOptions = {
+      visibility: body.visibility === 'public' || body.visibility === 'private' ? body.visibility : 'all',
+      skipForks: body.skipForks === true,
+      skipArchived: body.skipArchived === true,
+      matchRegex: typeof body.matchRegex === 'string' && body.matchRegex ? body.matchRegex : undefined,
+      topics: Array.isArray(body.topics)
+        ? body.topics.filter((topic): topic is string => typeof topic === 'string' && topic.trim()).map((topic) => topic.trim())
+        : undefined,
+    };
+    const client = new GitHubClient(pat);
+    const repos = targetType === 'user'
+      ? await client.listUserRepos(targetName, options)
+      : await client.listOrgRepos(targetName, options);
+    return Response.json({ repositories: repos });
+  } catch (error) {
+    return Response.json(
+      { error: error instanceof Error ? error.message : String(error) },
+      { status: 400 }
+    );
+  }
+}
