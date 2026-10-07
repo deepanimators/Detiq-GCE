@@ -12,3 +12,4 @@ extractor.yaml
 
 # macOS
 .DS_Store
+.vercel
