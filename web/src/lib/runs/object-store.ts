@@ -1,17 +1,6 @@
-import {
-  DeleteObjectCommand,
-  GetObjectCommand,
-  HeadBucketCommand,
-  ListObjectsV2Command,
-  PutObjectCommand,
-  S3Client,
-} from '@aws-sdk/client-s3';
-
-export type RunObjectStoreConfig = {
-  client: S3Client;
-  bucket: string;
-  prefix: string;
-};
+import { R2Adapter } from '@/lib/adapters/r2';
+import { S3Adapter } from '@/lib/adapters/s3';
+import { type DurableStorageAdapter, isDurableStorageAdapter, normalizeStorageError } from '@/lib/adapters/base';
 
 export class RunObjectStoreConfigurationError extends Error {
   constructor(message: string) {
@@ -20,91 +9,65 @@ export class RunObjectStoreConfigurationError extends Error {
   }
 }
 
-export function getRunObjectStore(): RunObjectStoreConfig {
-  const r2 = process.env.R2_ACCOUNT_ID &&
-    process.env.R2_ACCESS_KEY_ID &&
-    process.env.R2_SECRET_ACCESS_KEY &&
-    process.env.R2_BUCKET
-    ? {
-        endpoint: `https://${process.env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
-        region: 'auto',
+export function getPlatformStorageAdapter(): DurableStorageAdapter {
+  const r2 = process.env.R2_ACCOUNT_ID && process.env.R2_ACCESS_KEY_ID && process.env.R2_SECRET_ACCESS_KEY && process.env.R2_BUCKET
+    ? new R2Adapter({
+        accountId: process.env.R2_ACCOUNT_ID,
         accessKeyId: process.env.R2_ACCESS_KEY_ID,
         secretAccessKey: process.env.R2_SECRET_ACCESS_KEY,
         bucket: process.env.R2_BUCKET,
-      }
+      })
     : null;
 
-  const s3 = process.env.S3_ACCESS_KEY_ID &&
-    process.env.S3_SECRET_ACCESS_KEY &&
-    process.env.S3_BUCKET
-    ? {
-        endpoint: process.env.S3_ENDPOINT,
+  const s3 = process.env.S3_ACCESS_KEY_ID && process.env.S3_SECRET_ACCESS_KEY && process.env.S3_BUCKET
+    ? new S3Adapter({
         region: process.env.S3_REGION ?? 'us-east-1',
         accessKeyId: process.env.S3_ACCESS_KEY_ID,
         secretAccessKey: process.env.S3_SECRET_ACCESS_KEY,
         bucket: process.env.S3_BUCKET,
-      }
+      })
     : null;
 
-  const config = r2 ?? s3;
-  if (!config) {
-    throw new Error(
+  const adapter = r2 ?? s3;
+  if (!adapter || !isDurableStorageAdapter(adapter)) {
+    throw new RunObjectStoreConfigurationError(
       'Durable object storage is not configured. Set the R2_* or S3_* storage variables in Vercel.'
     );
   }
 
-  return {
-    client: new S3Client({
-      ...(config.endpoint ? { endpoint: config.endpoint } : {}),
-      region: config.region,
-      credentials: {
-        accessKeyId: config.accessKeyId,
-        secretAccessKey: config.secretAccessKey,
-      },
-    }),
-    bucket: config.bucket,
-    prefix: (process.env.RUN_STORE_KEY_PREFIX ?? 'detiq').replace(/^\/+|\/+$/g, ''),
-  };
+  return adapter;
+}
+
+export function getPlatformPrefix(): string {
+  return (process.env.RUN_STORE_KEY_PREFIX ?? 'detiq').replace(/^\/+|\/+$/g, '');
 }
 
 export async function putRunObject(key: string, body: string): Promise<void> {
-  const store = getRunObjectStore();
-  try {
-    await store.client.send(new PutObjectCommand({
-      Bucket: store.bucket,
-      Key: `${store.prefix}/${key}`,
-      Body: body,
-      ContentType: 'application/json',
-    }));
-  } catch (error) {
-    throw normalizeObjectStoreError(error, store.bucket);
-  }
+  const adapter = getPlatformStorageAdapter();
+  await adapter.upload(`${getPlatformPrefix()}/${key}`, Buffer.from(body), 'application/json');
 }
 
 export async function putRunObjectOptimistic(key: string, body: string, ifMatchEtag?: string): Promise<{ etag: string }> {
-  const store = getRunObjectStore();
-  try {
-    const command = new PutObjectCommand({
-      Bucket: store.bucket,
-      Key: `${store.prefix}/${key}`,
-      Body: body,
-      ContentType: 'application/json',
-      IfMatch: ifMatchEtag,
-    });
-    // For create only (fail if exists) we could use IfNoneMatch: '*'
-    if (ifMatchEtag === '') {
-      delete command.input.IfMatch;
-      command.input.IfNoneMatch = '*';
-    }
+  const adapter = getPlatformStorageAdapter();
+  if (!adapter.uploadOptimistic) {
+     throw new Error(`Adapter ${adapter.name} does not support optimistic uploads`);
+  }
+  return await adapter.uploadOptimistic(`${getPlatformPrefix()}/${key}`, Buffer.from(body), 'application/json', ifMatchEtag);
+}
 
-    const result = await store.client.send(command);
-    return { etag: result.ETag! };
+export async function getRunObjectWithEtag(key: string): Promise<{ body: string, etag: string } | null> {
+  const adapter = getPlatformStorageAdapter();
+  if (!adapter.download) {
+     throw new Error(`Adapter ${adapter.name} does not support downloads`);
+  }
+  try {
+    const { content, etag } = await adapter.download(`${getPlatformPrefix()}/${key}`);
+    return { body: content.toString('utf8'), etag: etag ?? '' };
   } catch (error) {
-    const err = error as any;
-    if (err.name === 'PreconditionFailed' || err.$metadata?.httpStatusCode === 412) {
-      throw new Error(`OptimisticLockingFailed: The ETag did not match for ${key}`);
+    if ((error as any).code === 'NoSuchKey' || (error as any).code === 'NotFound' || (error as any).httpStatus === 404) {
+      return null;
     }
-    throw normalizeObjectStoreError(error, store.bucket);
+    throw error;
   }
 }
 
@@ -113,64 +76,16 @@ export async function getRunObject(key: string): Promise<string | null> {
   return res ? res.body : null;
 }
 
-export async function getRunObjectWithEtag(key: string): Promise<{ body: string, etag: string } | null> {
-  const store = getRunObjectStore();
-  try {
-    const result = await store.client.send(new GetObjectCommand({
-      Bucket: store.bucket,
-      Key: `${store.prefix}/${key}`,
-    }));
-    return result.Body && result.ETag ? { body: await result.Body.transformToString(), etag: result.ETag } : null;
-  } catch (error) {
-    if (isNotFound(error)) return null;
-    throw error;
-  }
-}
-
 export async function deleteRunObject(key: string): Promise<void> {
-  const store = getRunObjectStore();
-  await store.client.send(new DeleteObjectCommand({
-    Bucket: store.bucket,
-    Key: `${store.prefix}/${key}`,
-  }));
-}
-
-export async function listRunObjects(prefix: string): Promise<string[]> {
-  const store = getRunObjectStore();
-  const result = await store.client.send(new ListObjectsV2Command({
-    Bucket: store.bucket,
-    Prefix: `${store.prefix}/${prefix}`,
-  }));
-  return (result.Contents ?? [])
-    .map((item) => item.Key)
-    .filter((key): key is string => Boolean(key))
-    .map((key) => key.slice(`${store.prefix}/`.length));
+  const adapter = getPlatformStorageAdapter();
+  if (!adapter.delete) {
+     throw new Error(`Adapter ${adapter.name} does not support deletes`);
+  }
+  await adapter.delete(`${getPlatformPrefix()}/${key}`);
 }
 
 export async function checkRunObjectStore(): Promise<void> {
-  const store = getRunObjectStore();
-  await store.client.send(new HeadBucketCommand({ Bucket: store.bucket }));
+  const adapter = getPlatformStorageAdapter();
+  await adapter.preflight();
 }
 
-function isNotFound(error: unknown): boolean {
-  const value = error as { name?: string; $metadata?: { httpStatusCode?: number } };
-  return value.$metadata?.httpStatusCode === 404 ||
-    value.name === 'NoSuchKey' ||
-    value.name === 'NotFound';
-}
-
-function normalizeObjectStoreError(error: unknown, bucket: string): Error {
-  const value = error as {
-    name?: string;
-    Code?: string;
-    $metadata?: { httpStatusCode?: number };
-  };
-  const code = value.Code ?? value.name;
-  const status = value.$metadata?.httpStatusCode;
-  if (code === 'NoSuchBucket' || code === 'NotFound' || status === 404) {
-    return new RunObjectStoreConfigurationError(
-      `Configured object-storage bucket "${bucket}" was not found. Verify R2_ACCOUNT_ID and R2_BUCKET, and confirm the bucket exists in that Cloudflare account.`
-    );
-  }
-  return error instanceof Error ? error : new Error(String(error));
-}

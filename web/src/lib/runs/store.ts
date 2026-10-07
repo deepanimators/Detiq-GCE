@@ -2,7 +2,7 @@ import { mkdir, readFile, rename, writeFile } from 'fs/promises';
 import path from 'path';
 import type { BackupRunRecord, RunEvent, RunEventType, StoredRun } from './types';
 import {
-  getRunObjectStore,
+  getPlatformStorageAdapter,
   getRunObject,
   putRunObject,
 } from './object-store';
@@ -151,7 +151,7 @@ export function getRunStore(): RunStore {
 
   if (process.env.VERCEL === '1') {
     try {
-      getRunObjectStore();
+      getPlatformStorageAdapter();
     } catch (error) {
       throw new RunStoreConfigurationError(error instanceof Error ? error.message : String(error));
     }

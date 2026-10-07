@@ -1,17 +1,18 @@
 import crypto from 'crypto';
-import { PutObjectCommand } from '@aws-sdk/client-s3';
 import type { QueuedRun } from './types';
 import {
-  deleteRunObject,
-  getRunObject,
-  getRunObjectStore,
-  listRunObjects,
-  putRunObject,
+  getRunObjectWithEtag,
+  putRunObjectOptimistic,
 } from './object-store';
 
 type ClaimLease = {
   claimedAt: string;
   leaseExpiresAt: string;
+};
+
+type JobState = {
+  job: QueuedRun;
+  claim?: ClaimLease;
 };
 
 export class RunQueueConfigurationError extends Error {
@@ -31,7 +32,7 @@ function encryptionKey(): Buffer {
   return crypto.createHash('sha256').update(secret).digest();
 }
 
-function encrypt(value: QueuedRun): string {
+function encrypt(value: JobState): string {
   const iv = crypto.randomBytes(12);
   const cipher = crypto.createCipheriv('aes-256-gcm', encryptionKey(), iv);
   const ciphertext = Buffer.concat([cipher.update(JSON.stringify(value), 'utf8'), cipher.final()]);
@@ -42,7 +43,7 @@ function encrypt(value: QueuedRun): string {
   ].join('.');
 }
 
-function decrypt(value: string): QueuedRun {
+function decrypt(value: string): JobState {
   const [ivValue, tagValue, ciphertextValue] = value.split('.');
   if (!ivValue || !tagValue || !ciphertextValue) throw new Error('Invalid queued run payload.');
   const decipher = crypto.createDecipheriv(
@@ -56,7 +57,7 @@ function decrypt(value: string): QueuedRun {
       decipher.update(Buffer.from(ciphertextValue, 'base64url')),
       decipher.final(),
     ]).toString('utf8')
-  ) as QueuedRun;
+  ) as JobState;
 }
 
 export function isDurableRunQueueConfigured(): boolean {
@@ -66,83 +67,128 @@ export function isDurableRunQueueConfigured(): boolean {
   );
 }
 
+const QUEUE_STATE_KEY = 'queue/state.json';
+
+type QueueState = {
+  jobs: Record<string, string>; // runId -> encrypted JobState
+};
+
+async function getQueueState(): Promise<{ state: QueueState; etag: string }> {
+  const res = await getRunObjectWithEtag(QUEUE_STATE_KEY);
+  if (!res) {
+    return { state: { jobs: {} }, etag: '' }; // empty state
+  }
+  return { state: JSON.parse(res.body), etag: res.etag };
+}
+
 export async function enqueueRun(job: QueuedRun): Promise<void> {
-  await putRunObject(`queue/queued/${job.runId}.json`, encrypt(job));
+  let retries = 5;
+  while (retries > 0) {
+    const { state, etag } = await getQueueState();
+    state.jobs[job.runId] = encrypt({ job });
+    try {
+      await putRunObjectOptimistic(QUEUE_STATE_KEY, JSON.stringify(state), etag);
+      return;
+    } catch (error: any) {
+      if (error.message?.includes('OptimisticLockingFailed')) {
+        retries--;
+        await new Promise(r => setTimeout(r, 100 * Math.random()));
+        continue;
+      }
+      throw error;
+    }
+  }
+  throw new Error('Failed to enqueue job due to high contention.');
 }
 
 export async function claimRun(options: {
   preferredRunId?: string;
   exact?: boolean;
 } = {}): Promise<{ job: QueuedRun; token: string } | null> {
-  const queued = orderQueuedTokens(await listRunObjects('queue/queued/'), options.preferredRunId);
-  for (const token of queued) {
-    const runId = token.split('/').at(-1)?.replace(/\.json$/, '');
-    if (!runId) continue;
-    if (options.exact && runId !== options.preferredRunId) continue;
-    const claimKey = `queue/claimed/${runId}.json`;
+  const now = Date.now();
+  let retries = 5;
+
+  while (retries > 0) {
+    const { state, etag } = await getQueueState();
+    let selectedRunId: string | null = null;
+    let selectedState: JobState | null = null;
+
+    if (options.preferredRunId && state.jobs[options.preferredRunId]) {
+      const jobState = decrypt(state.jobs[options.preferredRunId]!);
+      if (isClaimable(jobState, now)) {
+        selectedRunId = options.preferredRunId;
+        selectedState = jobState;
+      }
+    }
+
+    if (!selectedRunId && !options.exact) {
+      for (const [runId, encryptedData] of Object.entries(state.jobs)) {
+        try {
+          const jobState = decrypt(encryptedData);
+          if (isClaimable(jobState, now)) {
+            selectedRunId = runId;
+            selectedState = jobState;
+            break;
+          }
+        } catch {
+          // ignore invalid items
+        }
+      }
+    }
+
+    if (!selectedRunId || !selectedState) return null;
+
+    selectedState.claim = {
+      claimedAt: new Date(now).toISOString(),
+      leaseExpiresAt: new Date(now + claimLeaseMs()).toISOString(),
+    };
+
+    state.jobs[selectedRunId] = encrypt(selectedState);
 
     try {
-      await deleteExpiredClaim(claimKey);
-      const store = getRunObjectStore();
-      const now = Date.now();
-      await store.client.send(new PutObjectCommand({
-        Bucket: store.bucket,
-        Key: `${store.prefix}/${claimKey}`,
-        Body: JSON.stringify({
-          claimedAt: new Date(now).toISOString(),
-          leaseExpiresAt: new Date(now + claimLeaseMs()).toISOString(),
-        } satisfies ClaimLease),
-        ContentType: 'application/json',
-        IfNoneMatch: '*',
-      }));
-      const value = await getRunObject(token);
-      if (!value) {
-        await deleteRunObject(claimKey);
+      await putRunObjectOptimistic(QUEUE_STATE_KEY, JSON.stringify(state), etag);
+      return { job: selectedState.job, token: selectedRunId };
+    } catch (error: any) {
+      if (error.message?.includes('OptimisticLockingFailed')) {
+        retries--;
+        await new Promise(r => setTimeout(r, 100 * Math.random()));
         continue;
       }
-      const job = decrypt(value);
-      if (job.availableAt && Date.parse(job.availableAt) > Date.now()) {
-        await deleteRunObject(claimKey);
-        continue;
-      }
-      return { job, token };
-    } catch (error) {
-      if (isAlreadyClaimed(error)) continue;
       throw error;
     }
   }
   return null;
 }
 
-function orderQueuedTokens(tokens: string[], preferredRunId?: string): string[] {
-  if (!preferredRunId) return tokens;
-  return [...tokens].sort((a, b) => {
-    const aPreferred = a.endsWith(`/${preferredRunId}.json`);
-    const bPreferred = b.endsWith(`/${preferredRunId}.json`);
-    if (aPreferred === bPreferred) return 0;
-    return aPreferred ? -1 : 1;
-  });
-}
-
 export async function acknowledgeRun(token: string): Promise<void> {
-  const runId = token.split('/').at(-1)?.replace(/\.json$/, '');
-  if (!runId) throw new Error('Invalid queued run token.');
-  await deleteRunObject(token);
-  await deleteRunObject(`queue/claimed/${runId}.json`);
+  const runId = token; // token is just runId in this model
+  let retries = 5;
+  while (retries > 0) {
+    const { state, etag } = await getQueueState();
+    if (!state.jobs[runId]) return; // already removed
+    delete state.jobs[runId];
+
+    try {
+      await putRunObjectOptimistic(QUEUE_STATE_KEY, JSON.stringify(state), etag);
+      return;
+    } catch (error: any) {
+      if (error.message?.includes('OptimisticLockingFailed')) {
+        retries--;
+        await new Promise(r => setTimeout(r, 100 * Math.random()));
+        continue;
+      }
+      throw error;
+    }
+  }
 }
 
-async function deleteExpiredClaim(claimKey: string): Promise<void> {
-  const raw = await getRunObject(claimKey);
-  if (!raw) return;
-
-  try {
-    const lease = JSON.parse(raw) as Partial<ClaimLease>;
-    if (!lease.leaseExpiresAt || Date.parse(lease.leaseExpiresAt) > Date.now()) return;
-  } catch {
-    return;
+function isClaimable(jobState: JobState, now: number): boolean {
+  if (jobState.job.availableAt && Date.parse(jobState.job.availableAt) > now) {
+    return false;
   }
-
-  await deleteRunObject(claimKey);
+  if (!jobState.claim) return true;
+  if (Date.parse(jobState.claim.leaseExpiresAt) < now) return true; // lease expired
+  return false;
 }
 
 function claimLeaseMs(): number {
@@ -151,9 +197,4 @@ function claimLeaseMs(): number {
     ? configuredSeconds
     : 900;
   return seconds * 1000;
-}
-
-function isAlreadyClaimed(error: unknown): boolean {
-  const value = error as { $metadata?: { httpStatusCode?: number }; name?: string };
-  return value.$metadata?.httpStatusCode === 412 || value.name === 'PreconditionFailed';
 }
