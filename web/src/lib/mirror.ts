@@ -79,8 +79,23 @@ export async function processMirrorRepo(args: {
       captureMode: 'mirror',
       timestamp: new Date().toISOString(),
       artifacts: [
-        { name: 'repository.bundle', size: bundleStat.size, sha256: bundleSha256 },
-        { name: 'refs.json' }
+        { 
+          kind: 'bundle',
+          name: 'repository.bundle',
+          path: 'repository.bundle',
+          size: bundleStat.size, 
+          sha256: bundleSha256,
+          destination: 'adapters',
+          verification_status: 'unverified'
+        },
+        { 
+          kind: 'metadata',
+          name: 'refs.json',
+          path: 'refs.json',
+          size: (await fs.promises.stat(refsPath)).size,
+          destination: 'adapters',
+          verification_status: 'unverified'
+        }
       ]
     };
     await fs.promises.writeFile(manifestPath, JSON.stringify(manifest, null, 2));
