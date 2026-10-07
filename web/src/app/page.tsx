@@ -61,9 +61,19 @@ const METADATA_TYPES = [
   { id: 'milestones', label: 'Milestones' },
 ];
 
-const FORM_STORAGE_KEY = 'detiq-gce-form-v1';
+const LEGACY_FORM_STORAGE_KEY = 'detiq-gce-form-v1';
+const CREDENTIAL_STORAGE_KEYS = {
+  source: 'detiq-gce-source-v1',
+  r2: 'detiq-gce-r2-v1',
+  s3: 'detiq-gce-s3-v1',
+  gdrive: 'detiq-gce-gdrive-v1',
+  githubTarget: 'detiq-gce-github-target-v1',
+  azure: 'detiq-gce-azure-v1',
+} as const;
 
-type PersistedFormState = Record<string, unknown>;
+type CredentialSection = keyof typeof CREDENTIAL_STORAGE_KEYS;
+type PersistedSectionState = Record<string, unknown>;
+type CredentialStatusMap = Partial<Record<CredentialSection, string>>;
 
 // ── Shared UI components ──────────────────────────────────────────────────────
 
@@ -150,6 +160,36 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   );
 }
 
+function SectionStorageActions({
+  label,
+  status,
+  disabled,
+  onSave,
+  onClear,
+}: {
+  label: string;
+  status?: string;
+  disabled?: boolean;
+  onSave: () => void;
+  onClear: () => void;
+}) {
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-2 border-t border-zinc-100 dark:border-zinc-800 pt-3">
+      <p className="text-[11px] text-zinc-400 min-h-4 flex-1">{status || 'Saved only when you choose.'}</p>
+      <div className="flex items-center gap-2">
+        <Button type="button" size="xs" variant="outline" onClick={onSave} disabled={disabled}>
+          <Save data-icon="inline-start" />
+          Save {label}
+        </Button>
+        <Button type="button" size="xs" variant="ghost" onClick={onClear} disabled={disabled} className="text-zinc-500 hover:text-red-600">
+          <Trash2 data-icon="inline-start" />
+          Clear
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 function canUseLocalStorage(): boolean {
   try {
     const key = '__detiq_storage_probe__';
@@ -224,6 +264,13 @@ function fallbackCopyText(text: string): boolean {
   }
 }
 
+function readStoredSection(storageKey: string): PersistedSectionState | null {
+  const saved = localStorage.getItem(storageKey);
+  if (!saved) return null;
+  const parsed = JSON.parse(saved) as unknown;
+  return parsed && typeof parsed === 'object' ? parsed as PersistedSectionState : null;
+}
+
 // ── Main ─────────────────────────────────────────────────────────────────────
 
 export default function Home() {
@@ -294,91 +341,118 @@ export default function Home() {
   const [currentRun, setCurrentRun] = useState<RunRecord | null>(null);
   const [formHydrated, setFormHydrated] = useState(false);
   const [storageAvailable, setStorageAvailable] = useState(true);
-  const [credentialSaveStatus, setCredentialSaveStatus] = useState('');
+  const [credentialSaveStatus, setCredentialSaveStatus] = useState<CredentialStatusMap>({});
   const [logActionStatus, setLogActionStatus] = useState('');
   const logsEndRef = useRef<HTMLDivElement>(null);
+
+  function applyPersistedSection(section: CredentialSection, state: PersistedSectionState) {
+    const setString = (key: string, setter: (value: string) => void) => {
+      if (typeof state[key] === 'string') setter(state[key] as string);
+    };
+    const setBoolean = (key: string, setter: (value: boolean) => void) => {
+      if (typeof state[key] === 'boolean') setter(state[key] as boolean);
+    };
+
+    if (section === 'source') {
+      setString('pat', setPat);
+      setString('targetName', setTargetName);
+      setString('matchRegex', setMatchRegex);
+      setString('topics', setTopics);
+      setString('targetType', (value) => {
+        if (value === 'user' || value === 'org') setTargetType(value);
+      });
+      setString('visibility', (value) => {
+        if (value === 'all' || value === 'public' || value === 'private') setVisibility(value);
+      });
+      setBoolean('skipForks', setSkipForks);
+      setBoolean('skipArchived', setSkipArchived);
+      setBoolean('dryRun', setDryRun);
+      setBoolean('metadataEnabled', setMetadataEnabled);
+      if (Array.isArray(state.metadataTypes)) {
+        const metadataTypeValues = state.metadataTypes.filter((v): v is string => typeof v === 'string');
+        queueMicrotask(() => {
+          setMetadataTypes(new Set(metadataTypeValues));
+        });
+      }
+      return;
+    }
+
+    if (section === 'r2') {
+      setBoolean('r2On', setR2On);
+      setString('r2AccountId', setR2AccountId);
+      setString('r2AccessKey', setR2AccessKey);
+      setString('r2SecretKey', setR2SecretKey);
+      setString('r2Bucket', setR2Bucket);
+      return;
+    }
+
+    if (section === 's3') {
+      setBoolean('s3On', setS3On);
+      setString('s3Region', setS3Region);
+      setString('s3AccessKey', setS3AccessKey);
+      setString('s3SecretKey', setS3SecretKey);
+      setString('s3Bucket', setS3Bucket);
+      return;
+    }
+
+    if (section === 'gdrive') {
+      setBoolean('gdriveOn', setGdriveOn);
+      setString('gdriveEmail', setGdriveEmail);
+      setString('gdriveKey', setGdriveKey);
+      setString('gdriveFolderId', setGdriveFolderId);
+      return;
+    }
+
+    if (section === 'githubTarget') {
+      setBoolean('ghOn', setGhOn);
+      setString('ghOwner', setGhOwner);
+      setString('ghRepo', setGhRepo);
+      setString('ghBranch', setGhBranch);
+      setString('ghPat', setGhPat);
+      return;
+    }
+
+    setBoolean('azureOn', setAzureOn);
+    setString('azureConn', setAzureConn);
+    setString('azureContainer', setAzureContainer);
+  }
 
   useEffect(() => {
     try {
       if (!canUseLocalStorage()) {
         queueMicrotask(() => {
           setStorageAvailable(false);
-          setCredentialSaveStatus('Browser storage is unavailable in this mode.');
+          setCredentialSaveStatus({ source: 'Browser storage is unavailable in this mode.' });
         });
         return;
       }
 
-      const saved = localStorage.getItem(FORM_STORAGE_KEY);
-      if (saved) {
-        const state = JSON.parse(saved) as Record<string, unknown>;
-        const setString = (key: string, setter: (value: string) => void) => {
-          if (typeof state[key] === 'string') setter(state[key] as string);
-        };
-        const setBoolean = (key: string, setter: (value: boolean) => void) => {
-          if (typeof state[key] === 'boolean') setter(state[key] as boolean);
-        };
-
-        setString('pat', setPat);
-        setString('targetName', setTargetName);
-        setString('matchRegex', setMatchRegex);
-        setString('topics', setTopics);
-        setString('maxFileSizeKb', setMaxFileSizeKb);
-        setString('extraExcludes', setExtraExcludes);
-        setString('repoConcurrency', setRepoConcurrency);
-        setString('fileConcurrency', setFileConcurrency);
-        setString('r2AccountId', setR2AccountId);
-        setString('r2AccessKey', setR2AccessKey);
-        setString('r2SecretKey', setR2SecretKey);
-        setString('r2Bucket', setR2Bucket);
-        setString('s3Region', setS3Region);
-        setString('s3AccessKey', setS3AccessKey);
-        setString('s3SecretKey', setS3SecretKey);
-        setString('s3Bucket', setS3Bucket);
-        setString('gdriveEmail', setGdriveEmail);
-        setString('gdriveKey', setGdriveKey);
-        setString('gdriveFolderId', setGdriveFolderId);
-        setString('ghOwner', setGhOwner);
-        setString('ghRepo', setGhRepo);
-        setString('ghBranch', setGhBranch);
-        setString('ghPat', setGhPat);
-        setString('azureConn', setAzureConn);
-        setString('azureContainer', setAzureContainer);
-        setString('targetType', (value) => {
-          if (value === 'user' || value === 'org') setTargetType(value);
-        });
-        setString('visibility', (value) => {
-          if (value === 'all' || value === 'public' || value === 'private') setVisibility(value);
-        });
-        setBoolean('skipForks', setSkipForks);
-        setBoolean('skipArchived', setSkipArchived);
-        setBoolean('dryRun', setDryRun);
-        setBoolean('useDefaultExcludes', setUseDefaultExcludes);
-        setBoolean('metadataEnabled', setMetadataEnabled);
-        setBoolean('r2On', setR2On);
-        setBoolean('s3On', setS3On);
-        setBoolean('gdriveOn', setGdriveOn);
-        setBoolean('ghOn', setGhOn);
-        setBoolean('azureOn', setAzureOn);
-        if (Array.isArray(state.metadataTypes)) {
-          const metadataTypeValues = state.metadataTypes.filter((v): v is string => typeof v === 'string');
-          queueMicrotask(() => {
-            setMetadataTypes(new Set(metadataTypeValues));
-          });
+      const legacyState = readStoredSection(LEGACY_FORM_STORAGE_KEY);
+      const restored: CredentialStatusMap = {};
+      for (const section of Object.keys(CREDENTIAL_STORAGE_KEYS) as CredentialSection[]) {
+        const state = readStoredSection(CREDENTIAL_STORAGE_KEYS[section]) ?? legacyState;
+        if (state) {
+          applyPersistedSection(section, state);
+          restored[section] = 'Saved values restored from this browser.';
         }
+      }
+
+      if (Object.keys(restored).length) {
         queueMicrotask(() => {
-          setCredentialSaveStatus('Saved credentials restored from this browser.');
+          setCredentialSaveStatus(restored);
         });
       }
     } catch {
       try {
-        localStorage.removeItem(FORM_STORAGE_KEY);
+        Object.values(CREDENTIAL_STORAGE_KEYS).forEach((key) => localStorage.removeItem(key));
+        localStorage.removeItem(LEGACY_FORM_STORAGE_KEY);
       } catch {
         queueMicrotask(() => {
           setStorageAvailable(false);
         });
       }
       queueMicrotask(() => {
-        setCredentialSaveStatus('Saved credentials were unreadable and were cleared.');
+        setCredentialSaveStatus({ source: 'Saved credentials were unreadable and were cleared.' });
       });
     } finally {
       setFormHydrated(true);
@@ -419,43 +493,58 @@ export default function Home() {
     });
   }
 
-  function buildPersistedFormState(): PersistedFormState {
-    return {
-      pat, targetType, targetName, visibility, skipForks, skipArchived, dryRun,
-      matchRegex, topics, maxFileSizeKb, useDefaultExcludes, extraExcludes,
-      repoConcurrency, fileConcurrency, metadataEnabled, metadataTypes: [...metadataTypes],
-      r2On, s3On, gdriveOn, ghOn, azureOn, r2AccountId, r2AccessKey, r2SecretKey,
-      r2Bucket, s3Region, s3AccessKey, s3SecretKey, s3Bucket, gdriveEmail, gdriveKey,
-      gdriveFolderId, ghOwner, ghRepo, ghBranch, ghPat, azureConn, azureContainer,
-      savedAt: new Date().toISOString(),
-    };
+  function buildPersistedSectionState(section: CredentialSection): PersistedSectionState {
+    const savedAt = new Date().toISOString();
+    if (section === 'source') {
+      return {
+        pat, targetType, targetName, visibility, skipForks, skipArchived, dryRun,
+        matchRegex, topics, metadataEnabled, metadataTypes: [...metadataTypes], savedAt,
+      };
+    }
+    if (section === 'r2') {
+      return { r2On, r2AccountId, r2AccessKey, r2SecretKey, r2Bucket, savedAt };
+    }
+    if (section === 's3') {
+      return { s3On, s3Region, s3AccessKey, s3SecretKey, s3Bucket, savedAt };
+    }
+    if (section === 'gdrive') {
+      return { gdriveOn, gdriveEmail, gdriveKey, gdriveFolderId, savedAt };
+    }
+    if (section === 'githubTarget') {
+      return { ghOn, ghOwner, ghRepo, ghBranch, ghPat, savedAt };
+    }
+    return { azureOn, azureConn, azureContainer, savedAt };
   }
 
-  function saveCredentials() {
+  function setSectionStatus(section: CredentialSection, message: string) {
+    setCredentialSaveStatus((prev) => ({ ...prev, [section]: message }));
+  }
+
+  function saveCredentialSection(section: CredentialSection) {
     if (!canUseLocalStorage()) {
       setStorageAvailable(false);
-      setCredentialSaveStatus('Browser storage is unavailable in this mode.');
+      setSectionStatus(section, 'Browser storage is unavailable in this mode.');
       return;
     }
 
     try {
-      localStorage.setItem(FORM_STORAGE_KEY, JSON.stringify(buildPersistedFormState()));
+      localStorage.setItem(CREDENTIAL_STORAGE_KEYS[section], JSON.stringify(buildPersistedSectionState(section)));
       setStorageAvailable(true);
-      setCredentialSaveStatus('Credentials saved in this browser.');
+      setSectionStatus(section, 'Saved in this browser.');
     } catch {
       setStorageAvailable(false);
-      setCredentialSaveStatus('Unable to save credentials. Browser storage may be blocked or full.');
+      setSectionStatus(section, 'Unable to save. Browser storage may be blocked or full.');
     }
   }
 
-  function clearSavedCredentials() {
+  function clearCredentialSection(section: CredentialSection) {
     try {
-      localStorage.removeItem(FORM_STORAGE_KEY);
-      setCredentialSaveStatus('Saved credentials cleared from this browser.');
+      localStorage.removeItem(CREDENTIAL_STORAGE_KEYS[section]);
+      setSectionStatus(section, 'Saved values cleared from this browser.');
       setStorageAvailable(true);
     } catch {
       setStorageAvailable(false);
-      setCredentialSaveStatus('Unable to clear credentials because browser storage is blocked.');
+      setSectionStatus(section, 'Unable to clear because browser storage is blocked.');
     }
   }
 
@@ -682,6 +771,14 @@ export default function Home() {
               <Check label="Skip archived" checked={skipArchived} onChange={setSkipArchived} />
               <Check label="Dry run" checked={dryRun} onChange={setDryRun} />
             </div>
+
+            <SectionStorageActions
+              label="source"
+              status={credentialSaveStatus.source}
+              disabled={!formHydrated || !storageAvailable}
+              onSave={() => saveCredentialSection('source')}
+              onClear={() => clearCredentialSection('source')}
+            />
           </Section>
 
           {/* Files */}
@@ -747,6 +844,13 @@ export default function Home() {
               <Field label="Access Key ID" value={r2AccessKey} onChange={setR2AccessKey} type="password" placeholder="R2 access key ID" />
               <Field label="Secret Access Key" value={r2SecretKey} onChange={setR2SecretKey} type="password" placeholder="R2 secret access key" />
               <Field label="Bucket Name" value={r2Bucket} onChange={setR2Bucket} placeholder="my-github-backup" />
+              <SectionStorageActions
+                label="R2"
+                status={credentialSaveStatus.r2}
+                disabled={!formHydrated || !storageAvailable}
+                onSave={() => saveCredentialSection('r2')}
+                onClear={() => clearCredentialSection('r2')}
+              />
             </AdapterToggle>
 
             <AdapterToggle label="AWS S3" logo="🟡" enabled={s3On} onToggle={() => setS3On(!s3On)}>
@@ -754,6 +858,13 @@ export default function Home() {
               <Field label="Access Key ID" value={s3AccessKey} onChange={setS3AccessKey} type="password" placeholder="AKIA..." />
               <Field label="Secret Access Key" value={s3SecretKey} onChange={setS3SecretKey} type="password" placeholder="secret" />
               <Field label="Bucket Name" value={s3Bucket} onChange={setS3Bucket} placeholder="my-github-backup" />
+              <SectionStorageActions
+                label="S3"
+                status={credentialSaveStatus.s3}
+                disabled={!formHydrated || !storageAvailable}
+                onSave={() => saveCredentialSection('s3')}
+                onClear={() => clearCredentialSection('s3')}
+              />
             </AdapterToggle>
 
             <AdapterToggle label="Google Drive" logo="🔵" enabled={gdriveOn} onToggle={() => setGdriveOn(!gdriveOn)}>
@@ -764,6 +875,13 @@ export default function Home() {
               <Field label="Root Folder ID" value={gdriveFolderId} onChange={setGdriveFolderId}
                 placeholder="1BxiMVs0XRA5nFMdKvBdBZjgmUUq..." mono
                 hint="From Drive URL: .../folders/THIS_PART — share folder with service account email" />
+              <SectionStorageActions
+                label="Drive"
+                status={credentialSaveStatus.gdrive}
+                disabled={!formHydrated || !storageAvailable}
+                onSave={() => saveCredentialSection('gdrive')}
+                onClear={() => clearCredentialSection('gdrive')}
+              />
             </AdapterToggle>
 
             <AdapterToggle label="GitHub Repo" logo="⚫" enabled={ghOn} onToggle={() => setGhOn(!ghOn)}>
@@ -775,6 +893,13 @@ export default function Home() {
               <Field label="PAT for target repo (blank = use source PAT)" value={ghPat} onChange={setGhPat}
                 type="password" placeholder="ghp_... (optional)"
                 hint="Target repo must exist. Best for small repos (<200 files)." />
+              <SectionStorageActions
+                label="GitHub target"
+                status={credentialSaveStatus.githubTarget}
+                disabled={!formHydrated || !storageAvailable}
+                onSave={() => saveCredentialSection('githubTarget')}
+                onClear={() => clearCredentialSection('githubTarget')}
+              />
             </AdapterToggle>
 
             <AdapterToggle label="Azure Blob Storage" logo="🔷" enabled={azureOn} onToggle={() => setAzureOn(!azureOn)}>
@@ -783,6 +908,13 @@ export default function Home() {
                 rows={3} />
               <Field label="Container Name" value={azureContainer} onChange={setAzureContainer} placeholder="github-backup"
                 hint="Created automatically if it doesn't exist" />
+              <SectionStorageActions
+                label="Azure"
+                status={credentialSaveStatus.azure}
+                disabled={!formHydrated || !storageAvailable}
+                onSave={() => saveCredentialSection('azure')}
+                onClear={() => clearCredentialSection('azure')}
+              />
             </AdapterToggle>
           </div>
 
@@ -797,30 +929,8 @@ export default function Home() {
               ? 'Run active...'
               : `Create Backup Run${countAdapters() > 1 ? ` → ${countAdapters()} targets` : ''}${metadataEnabled ? ' + metadata' : ''}`}
           </Button>
-          <div className="grid grid-cols-2 gap-2">
-            <Button
-              type="button"
-              variant="outline"
-              onClick={saveCredentials}
-              disabled={!formHydrated || !storageAvailable}
-              className="h-9"
-            >
-              <Save data-icon="inline-start" />
-              Save credentials
-            </Button>
-            <Button
-              type="button"
-              variant="ghost"
-              onClick={clearSavedCredentials}
-              disabled={!formHydrated}
-              className="h-9 text-zinc-500 hover:text-red-600"
-            >
-              <Trash2 data-icon="inline-start" />
-              Clear saved
-            </Button>
-          </div>
           <p className="text-[11px] text-zinc-400 px-1">
-            {credentialSaveStatus || 'Use Save credentials to remember this setup in the current browser.'}
+            Save controls are section-specific. Browser storage keeps only the sections you save.
           </p>
         </div>
 
