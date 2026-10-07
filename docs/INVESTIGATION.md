@@ -5,6 +5,20 @@ Add new entries at top with status tag.
 
 ---
 
+## Web Platform Investigations
+
+The active web-platform investigation has been split into focused documents:
+
+- [Worker queue and Vercel runtime](investigations/2026-10-07-worker-queue-and-vercel-runtime.md)
+- [GitHub API rate limits and capture modes](investigations/2026-10-07-github-api-rate-limit-and-capture-modes.md)
+- [Browser state, live log, and UX](investigations/2026-10-07-browser-state-live-log-and-ux.md)
+- [Investigation-derived production backlog](investigations/2026-10-07-production-implementation-backlog.md)
+
+Use these files with `TARGET_ARCHITECTURE.md`, `PLATFORM_MATURITY_ROADMAP.md`,
+and `OPERATIONS_RUNBOOK.md` when implementing the next production slices.
+
+---
+
 ## All Fixed Issues
 
 ### ✅ No retry on network/API failures
