@@ -402,6 +402,7 @@ export default function Home() {
   const [repoListOpen, setRepoListOpen] = useState(false);
 
   // Filters
+  const [captureMode, setCaptureMode] = useState<'mirror' | 'selective-api' | 'metadata-only'>('mirror');
   const [skipForks, setSkipForks] = useState(false);
   const [skipArchived, setSkipArchived] = useState(false);
   const [dryRun, setDryRun] = useState(false);
@@ -822,7 +823,7 @@ export default function Home() {
     const savedAt = new Date().toISOString();
     if (section === 'source') {
       return {
-        pat, targetType, targetName, visibility, skipForks, skipArchived, dryRun,
+        pat, targetType, targetName, visibility, skipForks, skipArchived, dryRun, captureMode,
         matchRegex, topics, metadataEnabled, metadataTypes: [...metadataTypes], savedAt,
       };
     }
@@ -906,6 +907,7 @@ export default function Home() {
           targetName,
           adapters: buildAdapterConfig(),
           options: {
+            captureMode,
             skipForks,
             skipArchived,
             dryRun,
@@ -1095,7 +1097,16 @@ export default function Home() {
               <Field label="Topics filter (comma-sep, AND)" value={topics} onChange={setTopics} placeholder="e.g. typescript,api" />
             </div>
 
-            <div className="flex flex-wrap gap-4">
+            <div className="flex flex-wrap gap-4 border-t border-zinc-100 dark:border-zinc-800 pt-3">
+              <div className="w-full">
+                <label className="block text-xs text-zinc-500 mb-1">Capture Mode</label>
+                <select value={captureMode} onChange={(e) => setCaptureMode(e.target.value as 'mirror' | 'selective-api' | 'metadata-only')}
+                  className="w-full px-3 py-2 text-sm rounded-lg border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800 text-zinc-900 dark:text-zinc-50 focus:outline-none focus:ring-2 focus:ring-zinc-900">
+                  <option value="mirror">Mirror Bundle (Recommended for full backup)</option>
+                  <option value="selective-api">Selective Files (REST API)</option>
+                  <option value="metadata-only">Metadata Only</option>
+                </select>
+              </div>
               <Check label="Skip forks" checked={skipForks} onChange={setSkipForks} />
               <Check label="Skip archived" checked={skipArchived} onChange={setSkipArchived} />
               <Check label="Dry run" checked={dryRun} onChange={setDryRun} />

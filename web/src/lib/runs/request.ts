@@ -69,6 +69,9 @@ function parseOptions(input: unknown): ExtractOptions {
     metadataTypes: asString(source.metadataTypes),
     selectedRepositories: asStringArray(source.selectedRepositories),
     branchOverrides: asStringRecord(source.branchOverrides),
+    captureMode: source.captureMode === 'mirror' || source.captureMode === 'selective-api' || source.captureMode === 'metadata-only'
+      ? source.captureMode
+      : undefined,
   };
 }
 

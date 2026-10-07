@@ -3,6 +3,7 @@ import { formatGitHubError, getGitHubErrorDetails, GitHubClient, type Repo, type
 import { isDurableStorageAdapter, type StorageAdapter } from '@/lib/adapters/base';
 import { getMimeType } from '@/lib/mime';
 import { MetadataExtractor, parseMetadataTypes, type MetadataOptions } from '@/lib/metadata';
+import { processMirrorRepo } from '@/lib/mirror';
 
 const DEFAULT_EXCLUDES = [
   'node_modules/', '.git/', 'dist/', 'build/', '.next/',
@@ -28,6 +29,7 @@ export type ExtractionRequest = {
   fileConcurrency?: number;
   metadata?: boolean;
   metadataTypes?: string;
+  captureMode?: 'mirror' | 'selective-api' | 'metadata-only';
   onLog: (msg: string) => void;
   onRepoComplete?: (summary: ExtractionSummary) => void;
   signal?: AbortSignal;
@@ -158,115 +160,127 @@ async function processRepo(args: {
 
   throwIfAborted(req.signal);
   onLog(`[start] ${label}`);
-  const progress = createRepoProgress();
 
-  let files = await client.getFileTree(repo.owner, repo.name, repo.defaultBranch);
-  throwIfAborted(req.signal);
-
-  if (excludePatterns.length) {
-    const before = files.length;
-    files = files.filter((f) => !matchesAny(f.path, excludePatterns));
-    const n = before - files.length;
-    if (n) onLog(`  Excluded ${n} files by pattern`);
-  }
-
-  if (req.maxFileSizeKb) {
-    const maxBytes = req.maxFileSizeKb * 1024;
-    const before = files.length;
-    files = files.filter((f) => f.size <= maxBytes);
-    const n = before - files.length;
-    if (n) onLog(`  Excluded ${n} files > ${req.maxFileSizeKb}KB`);
-  }
-
-  summary.totalFiles += files.length;
-  progress.discoveredFiles = files.length;
-  progress.discoveredFolders = countFolders(files.map((file) => file.path));
-  summary.totalFolders += progress.discoveredFolders;
-  onLog(`  Plan: ${files.length} files across ${progress.discoveredFolders} folder${progress.discoveredFolders === 1 ? '' : 's'} in ${label}`);
-
-  if (dryRun) {
-    summary.uploadedFiles += files.length;
-    summary.uploadedFolders += progress.discoveredFolders;
-    progress.uploadedFiles += files.length;
-    progress.uploadedFolders = new Set(files.map((file) => folderKey(file.path)));
-    onLog(`[done] ${label} (dry-run)`);
+  if (req.captureMode === 'metadata-only') {
+    onLog(`  Skipping code capture (metadata-only mode)`);
+  } else if (req.captureMode === 'mirror' || !req.captureMode) {
+    if (dryRun) {
+      onLog(`[done] ${label} (dry-run mirror)`);
+    } else {
+      await processMirrorRepo({ repo, adapters, req, summary, pat, onLog });
+    }
   } else {
-    const fileLimit = pLimit(fileConcurrency);
-    let uploaded = 0;
-    let fatalContentErrorMessage: string | null = null;
-    let fatalContentError: unknown = null;
+    // Selective API
+    const progress = createRepoProgress();
 
-    const fileResults = await Promise.allSettled(
-      files.map((file) =>
-        fileLimit(async () => {
-          if (fatalContentErrorMessage) throw new Error(fatalContentErrorMessage);
-          throwIfAborted(req.signal);
-          const storagePath = `${repo.owner}/${repo.name}/${file.path}`;
-          let content: Buffer;
-          const pendingAdapters = await adaptersMissingFile(adapters, storagePath, file.size);
-          if (!pendingAdapters.length) {
-            progress.skippedExistingFiles++;
-            progress.skippedExistingFolders.add(folderKey(file.path));
-            if (progress.skippedExistingFiles % 100 === 0) {
-              onLog(`  Resume skip: ${progress.skippedExistingFiles}/${files.length} already copied in ${label}`);
-            }
-            return;
-          }
-          try {
-            content = await client.getFileContent(repo.owner, repo.name, file.sha);
-          } catch (error) {
-            const message = formatGitHubError(error);
-            if (getRateLimitResetAt(error)) {
-              fatalContentError = error;
-              fatalContentErrorMessage = `${message} Stopping ${label} until the GitHub rate-limit window resets.`;
-              throw error;
-            }
-            if (message.includes('(403)')) {
-              fatalContentErrorMessage = `${message} Stopping ${label} to avoid repeating the same GitHub failure for every file.`;
-              throw new Error(fatalContentErrorMessage);
-            }
-            throw error;
-          }
-          throwIfAborted(req.signal);
-          await Promise.all(pendingAdapters.map(async (a) => {
-            try {
-              await a.upload(storagePath, content, getMimeType(file.path));
-            } catch (error) {
-              throw new Error(`${a.name}: ${formatError(error)}`);
-            }
-          }));
-          uploaded++;
-          progress.uploadedFiles++;
-          progress.uploadedFolders.add(folderKey(file.path));
-          if (uploaded % 50 === 0) onLog(`  Progress: ${uploaded}/${files.length} in ${label}`);
-        })
-      )
-    );
+    let files = await client.getFileTree(repo.owner, repo.name, repo.defaultBranch);
+    throwIfAborted(req.signal);
 
-    fileResults.forEach((r, i) => {
-      if (r.status === 'rejected') {
-        progress.failedFiles++;
-        onLog(`  [warn] File failed: ${files[i]?.path} — ${formatError(r.reason)}`);
-      }
-    });
-
-    if (fatalContentErrorMessage) {
-      onLog(`  [error] ${fatalContentErrorMessage}`);
-      applyRepoProgressToSummary(summary, progress);
-      logRepoProgress(label, progress, onLog, '[progress]');
-      if (fatalContentError) throw fatalContentError;
-      throw new Error(fatalContentErrorMessage);
+    if (excludePatterns.length) {
+      const before = files.length;
+      files = files.filter((f) => !matchesAny(f.path, excludePatterns));
+      const n = before - files.length;
+      if (n) onLog(`  Excluded ${n} files by pattern`);
     }
 
-    applyRepoProgressToSummary(summary, progress);
-    logRepoProgress(label, progress, onLog, '[done]');
-  }
+    if (req.maxFileSizeKb) {
+      const maxBytes = req.maxFileSizeKb * 1024;
+      const before = files.length;
+      files = files.filter((f) => f.size <= maxBytes);
+      const n = before - files.length;
+      if (n) onLog(`  Excluded ${n} files > ${req.maxFileSizeKb}KB`);
+    }
 
-  function formatError(error: unknown): string {
-    if (error instanceof Error) return error.message;
-    if (typeof error === 'string') return error;
-    if (error && typeof error === 'object' && 'message' in error) return String(error.message);
-    return String(error);
+    summary.totalFiles += files.length;
+    progress.discoveredFiles = files.length;
+    progress.discoveredFolders = countFolders(files.map((file) => file.path));
+    summary.totalFolders += progress.discoveredFolders;
+    onLog(`  Plan: ${files.length} files across ${progress.discoveredFolders} folder${progress.discoveredFolders === 1 ? '' : 's'} in ${label}`);
+
+    if (dryRun) {
+      summary.uploadedFiles += files.length;
+      summary.uploadedFolders += progress.discoveredFolders;
+      progress.uploadedFiles += files.length;
+      progress.uploadedFolders = new Set(files.map((file) => folderKey(file.path)));
+      onLog(`[done] ${label} (dry-run)`);
+    } else {
+      const fileLimit = pLimit(fileConcurrency);
+      let uploaded = 0;
+      let fatalContentErrorMessage: string | null = null;
+      let fatalContentError: unknown = null;
+
+      const fileResults = await Promise.allSettled(
+        files.map((file) =>
+          fileLimit(async () => {
+            if (fatalContentErrorMessage) throw new Error(fatalContentErrorMessage);
+            throwIfAborted(req.signal);
+            const storagePath = `${repo.owner}/${repo.name}/${file.path}`;
+            let content: Buffer;
+            const pendingAdapters = await adaptersMissingFile(adapters, storagePath, file.size);
+            if (!pendingAdapters.length) {
+              progress.skippedExistingFiles++;
+              progress.skippedExistingFolders.add(folderKey(file.path));
+              if (progress.skippedExistingFiles % 100 === 0) {
+                onLog(`  Resume skip: ${progress.skippedExistingFiles}/${files.length} already copied in ${label}`);
+              }
+              return;
+            }
+            try {
+              content = await client.getFileContent(repo.owner, repo.name, file.sha);
+            } catch (error) {
+              const message = formatGitHubError(error);
+              if (getRateLimitResetAt(error)) {
+                fatalContentError = error;
+                fatalContentErrorMessage = `${message} Stopping ${label} until the GitHub rate-limit window resets.`;
+                throw error;
+              }
+              if (message.includes('(403)')) {
+                fatalContentErrorMessage = `${message} Stopping ${label} to avoid repeating the same GitHub failure for every file.`;
+                throw new Error(fatalContentErrorMessage);
+              }
+              throw error;
+            }
+            throwIfAborted(req.signal);
+            await Promise.all(pendingAdapters.map(async (a) => {
+              try {
+                await a.upload(storagePath, content, getMimeType(file.path));
+              } catch (error) {
+                throw new Error(`${a.name}: ${formatError(error)}`);
+              }
+            }));
+            uploaded++;
+            progress.uploadedFiles++;
+            progress.uploadedFolders.add(folderKey(file.path));
+            if (uploaded % 50 === 0) onLog(`  Progress: ${uploaded}/${files.length} in ${label}`);
+          })
+        )
+      );
+
+      fileResults.forEach((r, i) => {
+        if (r.status === 'rejected') {
+          progress.failedFiles++;
+          onLog(`  [warn] File failed: ${files[i]?.path} — ${formatError(r.reason)}`);
+        }
+      });
+
+      if (fatalContentErrorMessage) {
+        onLog(`  [error] ${fatalContentErrorMessage}`);
+        applyRepoProgressToSummary(summary, progress);
+        logRepoProgress(label, progress, onLog, '[progress]');
+        if (fatalContentError) throw fatalContentError;
+        throw new Error(fatalContentErrorMessage);
+      }
+
+      applyRepoProgressToSummary(summary, progress);
+      logRepoProgress(label, progress, onLog, '[done]');
+    }
+
+    function formatError(error: unknown): string {
+      if (error instanceof Error) return error.message;
+      if (typeof error === 'string') return error;
+      if (error && typeof error === 'object' && 'message' in error) return String(error.message);
+      return String(error);
+    }
   }
 
   // Metadata after files

@@ -11,6 +11,7 @@ export type RunStatus =
   | 'cancelled';
 
 export type CaptureProfile = 'code' | 'mirror' | 'metadata' | 'compliance' | 'custom';
+export type CaptureMode = 'mirror' | 'selective-api' | 'metadata-only';
 
 export type RunEventType =
   | 'run.created'
@@ -50,7 +51,8 @@ export type ExtractOptions = {
   metadataTypes?: string;
   selectedRepositories?: string[];
   branchOverrides?: Record<string, string>;
-};
+  captureMode?: CaptureMode;
+}
 
 export type RunCreatePayload = {
   pat: string;
