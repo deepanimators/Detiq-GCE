@@ -33,11 +33,11 @@ By default, local run state is written to `.detiq-runs/`. Set `RUN_STATE_DIR` to
 it elsewhere. Vercel deployments use the configured S3-compatible destination
 (Cloudflare R2 or Amazon S3) for run records and queued jobs, so no Redis service is
 required. Configure the matching `R2_*` or `S3_*` variables and
-`RUN_QUEUE_ENCRYPTION_KEY`. The worker endpoint still requires an external scheduler
-or worker runtime to process queued objects. Small interactive runs are claimed and
-processed in the creating request by default (up to 10 repositories); set
-`DIRECT_RUN_REPO_LIMIT` to tune that safety limit. Larger runs remain queued until
-`/api/worker` is invoked with `CRON_SECRET`.
+`RUN_QUEUE_ENCRYPTION_KEY`. The `/api/worker` endpoint is invoked every minute by
+the Vercel cron declared in `vercel.json`. It claims one encrypted queue object per
+invocation, so the browser request returns immediately and long-running extraction
+is not tied to the `/api/runs` request lifecycle. Vercel authenticates cron requests
+with `CRON_SECRET`.
 
 Credentials are intentionally not persisted in run state. The in-process worker keeps
 submitted credentials only in memory long enough to execute the run. Production should

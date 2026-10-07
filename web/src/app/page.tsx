@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState, useRef } from 'react';
-import { ClipboardCopy, Download, Save, Trash2 } from 'lucide-react';
+import { ClipboardCopy, Download, Eye, EyeOff, Save, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -94,37 +94,68 @@ function Field({
   label: string; value: string; onChange: (v: string) => void;
   placeholder?: string; type?: string; mono?: boolean; hint?: string;
 }) {
+  const [visible, setVisible] = useState(false);
+  const isSecret = type === 'password';
+
   return (
     <div>
       <label className="block text-xs text-zinc-500 mb-1">{label}</label>
-      <input
-        type={type}
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        placeholder={placeholder}
-        className={`w-full px-3 py-2 text-sm rounded-lg border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800 text-zinc-900 dark:text-zinc-50 focus:outline-none focus:ring-2 focus:ring-zinc-900 dark:focus:ring-zinc-100 ${mono ? 'font-mono' : ''}`}
-      />
+      <div className="relative">
+        <input
+          type={isSecret && !visible ? 'password' : 'text'}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder={placeholder}
+          className={`w-full px-3 py-2 text-sm rounded-lg border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800 text-zinc-900 dark:text-zinc-50 focus:outline-none focus:ring-2 focus:ring-zinc-900 dark:focus:ring-zinc-100 ${mono ? 'font-mono' : ''} ${isSecret ? 'pr-10' : ''}`}
+        />
+        {isSecret && (
+          <button
+            type="button"
+            onClick={() => setVisible((current) => !current)}
+            aria-label={visible ? `Hide ${label}` : `Show ${label}`}
+            title={visible ? 'Hide secret' : 'Show secret'}
+            className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-1 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:hover:bg-zinc-700 dark:hover:text-zinc-100 focus:outline-none focus:ring-2 focus:ring-zinc-900 dark:focus:ring-zinc-100"
+          >
+            {visible ? <EyeOff size={16} aria-hidden="true" /> : <Eye size={16} aria-hidden="true" />}
+          </button>
+        )}
+      </div>
       {hint && <p className="text-xs text-zinc-400 mt-1">{hint}</p>}
     </div>
   );
 }
 
 function Textarea({
-  label, value, onChange, placeholder, rows = 4, hint,
+  label, value, onChange, placeholder, rows = 4, hint, secret = false,
 }: {
   label: string; value: string; onChange: (v: string) => void;
-  placeholder?: string; rows?: number; hint?: string;
+  placeholder?: string; rows?: number; hint?: string; secret?: boolean;
 }) {
+  const [visible, setVisible] = useState(false);
+
   return (
     <div>
       <label className="block text-xs text-zinc-500 mb-1">{label}</label>
-      <textarea
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        placeholder={placeholder}
-        rows={rows}
-        className="w-full px-3 py-2 text-sm rounded-lg border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800 text-zinc-900 dark:text-zinc-50 focus:outline-none focus:ring-2 focus:ring-zinc-900 font-mono resize-none"
-      />
+      <div className="relative">
+        <textarea
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder={placeholder}
+          rows={rows}
+          className={`w-full px-3 py-2 text-sm rounded-lg border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800 text-zinc-900 dark:text-zinc-50 focus:outline-none focus:ring-2 focus:ring-zinc-900 font-mono resize-none ${secret ? 'pr-10' : ''} ${secret && !visible ? '[-webkit-text-security:disc]' : ''}`}
+        />
+        {secret && (
+          <button
+            type="button"
+            onClick={() => setVisible((current) => !current)}
+            aria-label={visible ? `Hide ${label}` : `Show ${label}`}
+            title={visible ? 'Hide secret' : 'Show secret'}
+            className="absolute right-2 top-2 rounded p-1 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:hover:bg-zinc-700 dark:hover:text-zinc-100 focus:outline-none focus:ring-2 focus:ring-zinc-900 dark:focus:ring-zinc-100"
+          >
+            {visible ? <EyeOff size={16} aria-hidden="true" /> : <Eye size={16} aria-hidden="true" />}
+          </button>
+        )}
+      </div>
       {hint && <p className="text-xs text-zinc-400 mt-1">{hint}</p>}
     </div>
   );
@@ -514,26 +545,27 @@ export default function Home() {
       setLoadingRepositories(false);
     }
 
-    async function loadBranches(repo: RepositoryChoice) {
-      if (repo.branches?.length || loadingBranches) return;
-      setLoadingBranches(repo.name);
-      setRepositoryError('');
-      try {
-        const response = await fetch('/api/github/branches', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ pat, owner: repo.owner, repo: repo.name }),
-        });
-        const body = await response.json();
-        if (!response.ok) throw new Error(`${repo.name}: ${body.error ?? 'Unable to fetch branches'}`);
-        setRepositories((current) => current.map((item) => item.name === repo.name
-          ? { ...item, branches: body.branches as string[] }
-          : item));
-      } catch (error) {
-        setRepositoryError(error instanceof Error ? error.message : String(error));
-      } finally {
-        setLoadingBranches(null);
-      }
+  }
+
+  async function loadBranches(repo: RepositoryChoice) {
+    if (repo.branches?.length || loadingBranches) return;
+    setLoadingBranches(repo.name);
+    setRepositoryError('');
+    try {
+      const response = await fetch('/api/github/branches', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pat, owner: repo.owner, repo: repo.name }),
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(`${repo.name}: ${body.error ?? 'Unable to fetch branches'}`);
+      setRepositories((current) => current.map((item) => item.name === repo.name
+        ? { ...item, branches: body.branches as string[] }
+        : item));
+    } catch (error) {
+      setRepositoryError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setLoadingBranches(null);
     }
   }
 
@@ -1004,7 +1036,7 @@ export default function Home() {
               <Field label="Service Account Email" value={gdriveEmail} onChange={setGdriveEmail}
                 placeholder="backup@myproject.iam.gserviceaccount.com" />
               <Textarea label="Private Key (full key with BEGIN/END lines)" value={gdriveKey} onChange={setGdriveKey}
-                placeholder={"-----BEGIN PRIVATE KEY-----\nMIIEvQ...\n-----END PRIVATE KEY-----"} rows={5} />
+                placeholder={"-----BEGIN PRIVATE KEY-----\nMIIEvQ...\n-----END PRIVATE KEY-----"} rows={5} secret />
               <Field label="Root Folder ID" value={gdriveFolderId} onChange={setGdriveFolderId}
                 placeholder="1BxiMVs0XRA5nFMdKvBdBZjgmUUq..." mono
                 hint="From Drive URL: .../folders/THIS_PART — share folder with service account email" />
@@ -1038,7 +1070,7 @@ export default function Home() {
             <AdapterToggle label="Azure Blob Storage" logo="🔷" enabled={azureOn} onToggle={() => setAzureOn(!azureOn)}>
               <Textarea label="Connection String" value={azureConn} onChange={setAzureConn}
                 placeholder="DefaultEndpointsProtocol=https;AccountName=xxx;AccountKey=xxx;EndpointSuffix=core.windows.net"
-                rows={3} />
+                rows={3} secret />
               <Field label="Container Name" value={azureContainer} onChange={setAzureContainer} placeholder="github-backup"
                 hint="Created automatically if it doesn't exist" />
               <SectionStorageActions

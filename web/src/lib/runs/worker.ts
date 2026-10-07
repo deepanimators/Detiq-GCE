@@ -17,9 +17,6 @@ const activeRuns = new Map<string, ActiveRun>();
 export async function queueRun(runId: string, payload: RunCreatePayload, repositories: Repo[]): Promise<void> {
   if (isDurableRunQueueConfigured()) {
     await enqueueRun({ runId, payload, repositories, enqueuedAt: new Date().toISOString() });
-    if (repositories.length <= Number(process.env.DIRECT_RUN_REPO_LIMIT ?? 10)) {
-      await processNextQueuedRun();
-    }
     return;
   }
   if (activeRuns.has(runId)) return;
