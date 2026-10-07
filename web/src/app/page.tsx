@@ -585,7 +585,12 @@ export default function Home() {
       });
 
       const body = await res.json();
-      if (!body.run) throw new Error(body.error || `Request failed with HTTP ${res.status}`);
+      if (!body.run) {
+        const apiError = typeof body.error === 'string'
+          ? body.error
+          : body.error?.message ?? body.error?.code ?? `Request failed with HTTP ${res.status}`;
+        throw new Error(apiError);
+      }
       setCurrentRun(body.run);
 
       if (body.preflight?.warnings?.length) {
@@ -606,7 +611,7 @@ export default function Home() {
 
       await watchRun(body.run.id);
     } catch (e) {
-      addLog(`Connection error: ${e}`);
+      addLog(`Connection error: ${e instanceof Error ? e.message : String(e)}`);
       setRunning(false);
     }
   }
