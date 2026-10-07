@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState, useRef } from 'react';
-import { ClipboardCopy, Download, Eye, EyeOff, Save, Trash2 } from 'lucide-react';
+import { ClipboardCopy, Download, Eye, EyeOff, PlayCircle, Save, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -80,6 +80,7 @@ const CREDENTIAL_STORAGE_KEYS = {
   gdrive: 'detiq-gce-gdrive-v1',
   githubTarget: 'detiq-gce-github-target-v1',
   azure: 'detiq-gce-azure-v1',
+  worker: 'detiq-gce-worker-v1',
 } as const;
 
 type CredentialSection = keyof typeof CREDENTIAL_STORAGE_KEYS;
@@ -392,6 +393,9 @@ export default function Home() {
   const [storageAvailable, setStorageAvailable] = useState(true);
   const [credentialSaveStatus, setCredentialSaveStatus] = useState<CredentialStatusMap>({});
   const [logActionStatus, setLogActionStatus] = useState('');
+  const [workerSecret, setWorkerSecret] = useState('');
+  const [workerBusy, setWorkerBusy] = useState(false);
+  const [workerActionStatus, setWorkerActionStatus] = useState('');
   const logsEndRef = useRef<HTMLDivElement>(null);
 
   function applyPersistedSection(section: CredentialSection, state: PersistedSectionState) {
@@ -461,9 +465,14 @@ export default function Home() {
       return;
     }
 
-    setBoolean('azureOn', setAzureOn);
-    setString('azureConn', setAzureConn);
-    setString('azureContainer', setAzureContainer);
+    if (section === 'azure') {
+      setBoolean('azureOn', setAzureOn);
+      setString('azureConn', setAzureConn);
+      setString('azureContainer', setAzureContainer);
+      return;
+    }
+
+    setString('workerSecret', setWorkerSecret);
   }
 
   useEffect(() => {
@@ -479,7 +488,7 @@ export default function Home() {
       const legacyState = readStoredSection(LEGACY_FORM_STORAGE_KEY);
       const restored: CredentialStatusMap = {};
       for (const section of Object.keys(CREDENTIAL_STORAGE_KEYS) as CredentialSection[]) {
-        const state = readStoredSection(CREDENTIAL_STORAGE_KEYS[section]) ?? legacyState;
+        const state = readStoredSection(CREDENTIAL_STORAGE_KEYS[section]) ?? (section === 'worker' ? null : legacyState);
         if (state) {
           applyPersistedSection(section, state);
           restored[section] = 'Saved values restored from this browser.';
@@ -621,7 +630,10 @@ export default function Home() {
     if (section === 'githubTarget') {
       return { ghOn, ghOwner, ghRepo, ghBranch, ghPat, savedAt };
     }
-    return { azureOn, azureConn, azureContainer, savedAt };
+    if (section === 'azure') {
+      return { azureOn, azureConn, azureContainer, savedAt };
+    }
+    return { workerSecret, savedAt };
   }
 
   function setSectionStatus(section: CredentialSection, message: string) {
@@ -719,6 +731,13 @@ export default function Home() {
         return;
       }
 
+      if (workerSecret.trim()) {
+        addLog('[worker] Worker secret is present; requesting worker.');
+        void kickWorker({ automatic: true });
+      } else {
+        addLog('[worker] No worker secret set in the UI. If this run stays queued, enter WORKER_SECRET or CRON_SECRET and kick the worker.');
+      }
+
       await watchRun(body.run.id);
     } catch (e) {
       addLog(`Connection error: ${e instanceof Error ? e.message : String(e)}`);
@@ -796,6 +815,51 @@ export default function Home() {
     }
   }
 
+  async function kickWorker(options: { automatic?: boolean } = {}) {
+    const secret = workerSecret.trim();
+    if (!secret) {
+      setWorkerActionStatus('Enter WORKER_SECRET or CRON_SECRET before kicking the worker.');
+      return;
+    }
+
+    setWorkerBusy(true);
+    setWorkerActionStatus(options.automatic ? 'Requesting worker automatically...' : 'Requesting worker...');
+    try {
+      const response = await fetch('/api/worker', {
+        method: 'POST',
+        headers: { 'x-worker-secret': secret },
+      });
+      const body = await response.json().catch(() => ({})) as {
+        processed?: boolean;
+        error?: string;
+        message?: string;
+        code?: string;
+      };
+
+      if (!response.ok) {
+        throw new Error(body.message ?? body.error ?? body.code ?? `Worker failed with HTTP ${response.status}`);
+      }
+
+      const message = body.processed
+        ? 'Worker accepted one queued run.'
+        : 'Worker found no unclaimed queued run.';
+      setWorkerActionStatus(message);
+      addLog(`[worker] ${message}`);
+
+      if (currentRun) {
+        const runResponse = await fetch(`/api/runs/${currentRun.id}`, { cache: 'no-store' });
+        const stored = await runResponse.json() as { run?: RunRecord };
+        if (stored.run) setCurrentRun(stored.run);
+      }
+    } catch (error) {
+      const message = `Worker request failed: ${error instanceof Error ? error.message : String(error)}`;
+      setWorkerActionStatus(message);
+      addLog(`ERROR: ${message}`);
+    } finally {
+      setWorkerBusy(false);
+    }
+  }
+
   function isTerminalStatus(status: RunStatus) {
     return ['preflight_failed', 'completed', 'partial', 'failed', 'cancelled'].includes(status);
   }
@@ -848,6 +912,7 @@ export default function Home() {
     (dryRun || countAdapters() > 0)
   );
   const actualError = summarizeActualError(logs, currentRun);
+  const queuedNeedsWorker = running && currentRun?.status === 'queued';
 
   return (
     <div className="min-h-screen bg-zinc-50 dark:bg-zinc-950 font-sans">
@@ -1119,6 +1184,40 @@ export default function Home() {
           <p className="text-[11px] text-zinc-400 px-1">
             Save controls are section-specific. Browser storage keeps only the sections you save.
           </p>
+
+          <Section title="Worker Control">
+            <Field
+              label="Worker secret"
+              value={workerSecret}
+              onChange={setWorkerSecret}
+              placeholder="WORKER_SECRET or CRON_SECRET"
+              type="password"
+              hint="Used only to call /api/worker from this browser; it is not stored in run state."
+            />
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <p className="text-xs text-zinc-500 dark:text-zinc-400 flex-1">
+                {queuedNeedsWorker
+                  ? 'This run is queued and waiting for a worker invocation.'
+                  : 'Use this when a Vercel run stays queued because no scheduler has called the worker yet.'}
+              </p>
+              <Button type="button" size="sm" onClick={() => void kickWorker()} disabled={workerBusy || !workerSecret.trim()}>
+                <PlayCircle data-icon="inline-start" />
+                {workerBusy ? 'Kicking...' : 'Kick worker'}
+              </Button>
+            </div>
+            {workerActionStatus && (
+              <p className={`text-xs break-words ${workerActionStatus.startsWith('Worker request failed') ? 'text-red-600 dark:text-red-400' : 'text-zinc-500 dark:text-zinc-400'}`}>
+                {workerActionStatus}
+              </p>
+            )}
+            <SectionStorageActions
+              label="worker"
+              status={credentialSaveStatus.worker}
+              disabled={!formHydrated || !storageAvailable}
+              onSave={() => saveCredentialSection('worker')}
+              onClear={() => clearCredentialSection('worker')}
+            />
+          </Section>
         </div>
 
         {/* ── Right: live log ────────────────────────────────────────────── */}
@@ -1157,8 +1256,13 @@ export default function Home() {
             </div>
           </div>
 
-          {(actualError || logActionStatus) && (
+          {(queuedNeedsWorker || actualError || logActionStatus) && (
             <div className="border-b border-zinc-100 dark:border-zinc-800 px-4 py-3 flex-shrink-0 space-y-1 bg-zinc-50 dark:bg-zinc-900">
+              {queuedNeedsWorker && (
+                <p className="text-xs text-amber-600 dark:text-amber-400 break-words">
+                  <span className="font-semibold">Waiting for worker:</span> call <code className="bg-amber-100/70 dark:bg-amber-950 px-1 rounded">/api/worker</code> with <code className="bg-amber-100/70 dark:bg-amber-950 px-1 rounded">x-worker-secret</code>, or use Worker Control.
+                </p>
+              )}
               {actualError && (
                 <p className="text-xs text-red-600 dark:text-red-400 break-words">
                   <span className="font-semibold">Actual error:</span> {actualError}
@@ -1237,11 +1341,11 @@ export default function Home() {
       </main>
 
       <footer className="relative z-10 max-w-6xl mx-auto px-6 py-4 text-xs text-zinc-400 border-t border-zinc-100 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950 mt-2">
-        Scheduled runs via{' '}
+        Queue workers via{' '}
         <a href="https://cronjobs.org" className="underline hover:text-zinc-600">cronjobs.org</a>
-        {' '}→ POST <code className="bg-zinc-100 dark:bg-zinc-800 px-1 rounded">/api/cron</code>
-        {' '}with <code className="bg-zinc-100 dark:bg-zinc-800 px-1 rounded">x-cron-secret: YOUR_SECRET</code>
-        {' '}· Set <code className="bg-zinc-100 dark:bg-zinc-800 px-1 rounded">CRON_*</code> env vars in Vercel for cron config
+        {' '}→ POST <code className="bg-zinc-100 dark:bg-zinc-800 px-1 rounded">/api/worker</code>
+        {' '}with <code className="bg-zinc-100 dark:bg-zinc-800 px-1 rounded">x-worker-secret: YOUR_SECRET</code>
+        {' '}· Set <code className="bg-zinc-100 dark:bg-zinc-800 px-1 rounded">WORKER_SECRET</code> or <code className="bg-zinc-100 dark:bg-zinc-800 px-1 rounded">CRON_SECRET</code> in Vercel
       </footer>
     </div>
   );
