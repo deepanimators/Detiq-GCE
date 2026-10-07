@@ -14,7 +14,7 @@ function authorized(req: Request): boolean {
   return crypto.timingSafeEqual(Buffer.from(supplied), Buffer.from(expected));
 }
 
-async function process(req: Request): Promise<Response> {
+async function handleWorkerRequest(req: Request): Promise<Response> {
   if (!authorized(req)) return Response.json({ error: 'Unauthorized' }, { status: 401 });
   try {
     const processed = await processNextQueuedRun();
@@ -28,9 +28,9 @@ async function process(req: Request): Promise<Response> {
 }
 
 export async function GET(req: Request) {
-  return process(req);
+  return handleWorkerRequest(req);
 }
 
 export async function POST(req: Request) {
-  return process(req);
+  return handleWorkerRequest(req);
 }
