@@ -182,6 +182,40 @@ export async function acknowledgeRun(token: string): Promise<void> {
   }
 }
 
+export async function renewLease(token: string): Promise<boolean> {
+  const runId = token;
+  let retries = 5;
+  while (retries > 0) {
+    const { state, etag } = await getQueueState();
+    if (!state.jobs[runId]) return false; // already removed
+
+    let jobState: JobState;
+    try {
+      jobState = decrypt(state.jobs[runId]!);
+    } catch {
+      return false;
+    }
+
+    if (!jobState.claim) return false;
+
+    jobState.claim.leaseExpiresAt = new Date(Date.now() + claimLeaseMs()).toISOString();
+    state.jobs[runId] = encrypt(jobState);
+
+    try {
+      await putRunObjectOptimistic(QUEUE_STATE_KEY, JSON.stringify(state), etag);
+      return true;
+    } catch (error: any) {
+      if (error.message?.includes('OptimisticLockingFailed')) {
+        retries--;
+        await new Promise(r => setTimeout(r, 100 * Math.random()));
+        continue;
+      }
+      throw error;
+    }
+  }
+  return false;
+}
+
 function isClaimable(jobState: JobState, now: number): boolean {
   if (jobState.job.availableAt && Date.parse(jobState.job.availableAt) > now) {
     return false;

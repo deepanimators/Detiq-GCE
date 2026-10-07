@@ -9,6 +9,7 @@ import {
   enqueueRun,
   isDurableRunQueueConfigured,
   RunQueueConfigurationError,
+  renewLease,
 } from './queue';
 import type { RunCreatePayload } from './types';
 import { RepoJobQueue } from './job-queue';
@@ -96,6 +97,7 @@ export async function processNextQueuedRun(
   try {
     const result = await executeRun(
       job.runId,
+      token,
       job.payload,
       job.repositories,
       job.totalRepositories ?? job.repositories.length,
@@ -137,6 +139,7 @@ export function requestRunCancellation(runId: string): boolean {
 
 async function executeRun(
   runId: string,
+  token: string,
   payload: RunCreatePayload,
   repositories: Repo[],
   totalRepositories: number,
@@ -167,15 +170,24 @@ async function executeRun(
       : `Run ${runId} processing final ${chunk.length} queued repositories.`
   );
 
+  const adapters = buildAdaptersFromConfig(payload.adapters);
+  const emitLog = (message: string) => {
+    const safeMessage = redactSecrets(message);
+    logChain = logChain
+      .catch(() => undefined)
+      .then(() => emitRunEvent(runId, 'run.log', safeMessage))
+      .then(() => undefined);
+  };
+
+  let heartbeatInterval: ReturnType<typeof setInterval> | undefined;
+
   try {
-    const adapters = buildAdaptersFromConfig(payload.adapters);
-    const emitLog = (message: string) => {
-      const safeMessage = redactSecrets(message);
-      logChain = logChain
-        .catch(() => undefined)
-        .then(() => emitRunEvent(runId, 'run.log', safeMessage))
-        .then(() => undefined);
-    };
+    heartbeatInterval = setInterval(() => {
+      renewLease(token).catch(e => {
+        emitLog(`[warning] Failed to renew lease: ${e.message}`);
+      });
+      emitLog(`[heartbeat] Worker is still processing slice...`);
+    }, 30000);
 
     const workerId = process.env.VERCEL_URL || `worker-${Math.random().toString(36).substring(7)}`;
     const jobQueue = new RepoJobQueue(runId);
@@ -279,6 +291,7 @@ async function executeRun(
     return { completed: true, remainingRepositories: [] };
   } finally {
     if (timeout) clearTimeout(timeout);
+    if (heartbeatInterval) clearInterval(heartbeatInterval);
   }
 
   async function withRunTimeout<T>(promise: Promise<T>, activeController: AbortController, timeoutMs: number): Promise<T> {
