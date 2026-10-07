@@ -25,13 +25,7 @@ export async function POST(req: Request) {
     const repos = targetType === 'user'
       ? await client.listUserRepos(targetName, options)
       : await client.listOrgRepos(targetName, options);
-    const repositories = repos.length <= 50
-      ? await Promise.all(repos.map(async (repo) => ({
-          ...repo,
-          branches: await client.listBranches(repo.owner, repo.name),
-        })))
-      : repos;
-    return Response.json({ repositories });
+    return Response.json({ repositories: repos });
   } catch (error) {
     const details = getGitHubErrorDetails(error);
     return Response.json(

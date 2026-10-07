@@ -85,6 +85,7 @@ const CREDENTIAL_STORAGE_KEYS = {
 const RUN_CACHE_STORAGE_KEY = 'detiq-gce-run-cache-v1';
 const MAX_CACHED_RUNS = 10;
 const MAX_CACHED_LOG_LINES = 2000;
+const REPOSITORY_FETCH_TIMEOUT_MS = 25_000;
 const TERMINAL_RUN_STATUSES = new Set<RunStatus>([
   'preflight_failed',
   'completed',
@@ -722,10 +723,13 @@ export default function Home() {
     if (!pat || !targetName) return;
     setLoadingRepositories(true);
     setRepositoryError('');
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const timeout = window.setTimeout(() => controller?.abort(), REPOSITORY_FETCH_TIMEOUT_MS);
     try {
       const response = await fetch('/api/github/repos', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        signal: controller?.signal,
         body: JSON.stringify({
           pat, targetType, targetName, visibility, skipForks, skipArchived,
           matchRegex: matchRegex || undefined,
@@ -745,8 +749,11 @@ export default function Home() {
       setBranchOverrides(Object.fromEntries(next.map((repo) => [repo.name, repo.defaultBranch])));
       setRepoListOpen(false);
     } catch (error) {
-      setRepositoryError(error instanceof Error ? error.message : String(error));
+      setRepositoryError(error instanceof DOMException && error.name === 'AbortError'
+        ? 'Repository lookup timed out. GitHub may be rate-limiting or denying this token; check PAT org access, SSO authorization, and retry shortly.'
+        : error instanceof Error ? error.message : String(error));
     } finally {
+      window.clearTimeout(timeout);
       setLoadingRepositories(false);
     }
 
