@@ -1,7 +1,11 @@
 import { mkdir, readFile, rename, writeFile } from 'fs/promises';
 import path from 'path';
 import type { BackupRunRecord, RunEvent, RunEventType, StoredRun } from './types';
-import { getRunObjectStore, getRunObject, putRunObject } from './object-store';
+import {
+  getRunObjectStore,
+  getRunObject,
+  putRunObject,
+} from './object-store';
 
 export type RunUpdate = Partial<Omit<BackupRunRecord, 'id' | 'createdAt' | 'config'>>;
 

@@ -13,6 +13,13 @@ export type RunObjectStoreConfig = {
   prefix: string;
 };
 
+export class RunObjectStoreConfigurationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'RunObjectStoreConfigurationError';
+  }
+}
+
 export function getRunObjectStore(): RunObjectStoreConfig {
   const r2 = process.env.R2_ACCOUNT_ID &&
     process.env.R2_ACCESS_KEY_ID &&
@@ -62,12 +69,16 @@ export function getRunObjectStore(): RunObjectStoreConfig {
 
 export async function putRunObject(key: string, body: string): Promise<void> {
   const store = getRunObjectStore();
-  await store.client.send(new PutObjectCommand({
-    Bucket: store.bucket,
-    Key: `${store.prefix}/${key}`,
-    Body: body,
-    ContentType: 'application/json',
-  }));
+  try {
+    await store.client.send(new PutObjectCommand({
+      Bucket: store.bucket,
+      Key: `${store.prefix}/${key}`,
+      Body: body,
+      ContentType: 'application/json',
+    }));
+  } catch (error) {
+    throw normalizeObjectStoreError(error, store.bucket);
+  }
 }
 
 export async function getRunObject(key: string): Promise<string | null> {
@@ -114,4 +125,20 @@ function isNotFound(error: unknown): boolean {
   return value.$metadata?.httpStatusCode === 404 ||
     value.name === 'NoSuchKey' ||
     value.name === 'NotFound';
+}
+
+function normalizeObjectStoreError(error: unknown, bucket: string): Error {
+  const value = error as {
+    name?: string;
+    Code?: string;
+    $metadata?: { httpStatusCode?: number };
+  };
+  const code = value.Code ?? value.name;
+  const status = value.$metadata?.httpStatusCode;
+  if (code === 'NoSuchBucket' || code === 'NotFound' || status === 404) {
+    return new RunObjectStoreConfigurationError(
+      `Configured object-storage bucket "${bucket}" was not found. Verify R2_ACCOUNT_ID and R2_BUCKET, and confirm the bucket exists in that Cloudflare account.`
+    );
+  }
+  return error instanceof Error ? error : new Error(String(error));
 }
