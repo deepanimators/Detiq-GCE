@@ -1,5 +1,5 @@
 import crypto from 'crypto';
-import { processNextQueuedRun } from '@/lib/runs/worker';
+import { processQueuedRuns } from '@/lib/runs/worker';
 
 export const runtime = 'nodejs';
 export const maxDuration = 300;
@@ -37,8 +37,8 @@ async function handleWorkerRequest(req: Request): Promise<Response> {
     );
   }
   try {
-    const processed = await processNextQueuedRun();
-    return Response.json({ ok: true, processed });
+    const result = await processQueuedRuns();
+    return Response.json({ ok: true, ...result });
   } catch (error) {
     return Response.json(
       { ok: false, error: error instanceof Error ? error.message : String(error) },

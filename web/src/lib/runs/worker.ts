@@ -21,6 +21,11 @@ type ActiveRun = {
 const TERMINAL_STATUSES = new Set(['preflight_failed', 'completed', 'partial', 'failed', 'cancelled']);
 const activeRuns = new Map<string, ActiveRun>();
 
+export type WorkerBatchResult = {
+  processed: number;
+  exhausted: boolean;
+};
+
 export async function queueRun(runId: string, payload: RunCreatePayload, repositories: Repo[]): Promise<void> {
   if (!isDurableRunQueueConfigured()) {
     throw new RunQueueConfigurationError(
@@ -32,8 +37,26 @@ export async function queueRun(runId: string, payload: RunCreatePayload, reposit
 
   const directLimit = Number(process.env.DIRECT_RUN_REPO_LIMIT ?? 0);
   if (!isVercelRuntime() && directLimit > 0 && repositories.length <= directLimit) {
-    await processNextQueuedRun();
+    await processQueuedRuns({ maxJobs: 1 });
   }
+}
+
+export async function processQueuedRuns(options: {
+  maxJobs?: number;
+  maxRuntimeMs?: number;
+} = {}): Promise<WorkerBatchResult> {
+  const maxJobs = positiveInteger(options.maxJobs ?? Number(process.env.WORKER_BATCH_SIZE ?? 5), 5);
+  const maxRuntimeMs = positiveInteger(options.maxRuntimeMs ?? Number(process.env.WORKER_BATCH_RUNTIME_MS ?? 270_000), 270_000);
+  const deadline = Date.now() + maxRuntimeMs;
+  let processed = 0;
+
+  while (processed < maxJobs && Date.now() < deadline) {
+    const claimed = await processNextQueuedRun();
+    if (!claimed) return { processed, exhausted: true };
+    processed += 1;
+  }
+
+  return { processed, exhausted: false };
 }
 
 export async function processNextQueuedRun(): Promise<boolean> {
@@ -53,15 +76,15 @@ export async function processNextQueuedRun(): Promise<boolean> {
     await executeRun(job.runId, job.payload, job.repositories, controller);
     await acknowledgeRun(token);
   } catch (error) {
+    const message = redactSecrets(error instanceof Error ? error.message : String(error));
     await getRunStore().updateRun(job.runId, {
       status: 'failed',
       completedAt: new Date().toISOString(),
       errorCode: 'WorkerFailed',
-      errorMessage: redactSecrets(error instanceof Error ? error.message : String(error)),
+      errorMessage: message,
     });
-    await emitRunEvent(job.runId, 'run.failed', 'Durable worker failed before acknowledging the job.');
+    await emitRunEvent(job.runId, 'run.failed', `Durable worker failed before acknowledging the job: ${message}`);
     await acknowledgeRun(token);
-    throw error;
   } finally {
     activeRuns.delete(job.runId);
   }
@@ -143,4 +166,8 @@ async function executeRun(
 
 function isVercelRuntime(): boolean {
   return Boolean(process.env.VERCEL || process.env.VERCEL_ENV || process.env.VERCEL_URL);
+}
+
+function positiveInteger(value: number, fallback: number): number {
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
 }

@@ -9,8 +9,9 @@ import {
 } from '@/lib/runs/store';
 import { RunObjectStoreConfigurationError } from '@/lib/runs/object-store';
 import { RunQueueConfigurationError } from '@/lib/runs/queue';
-import { processNextQueuedRun, queueRun } from '@/lib/runs/worker';
+import { processQueuedRuns, queueRun } from '@/lib/runs/worker';
 import { formatGitHubError, getGitHubErrorDetails } from '@/lib/github';
+import { redactSecrets } from '@/lib/adapters/base';
 
 export const runtime = 'nodejs';
 export const maxDuration = 300;
@@ -61,7 +62,7 @@ export async function POST(req: Request) {
 
     await emitRunEvent(run.id, 'run.queued', `Run queued with ${repositories.length} repositories.`);
     await queueRun(run.id, payload, repositories);
-    dispatchWorkerAfterResponse();
+    dispatchWorkerAfterResponse(run.id);
 
     const stored = await store.getRun(run.id);
     return Response.json({ run: stored?.run ?? run, preflight: preflightResponse }, { status: 202 });
@@ -99,11 +100,34 @@ export async function POST(req: Request) {
   }
 }
 
-function dispatchWorkerAfterResponse(): void {
+function dispatchWorkerAfterResponse(runId: string): void {
   after(async () => {
     try {
-      await processNextQueuedRun();
+      await emitRunEvent(runId, 'run.log', '[worker] Dispatcher started.');
+      const result = await processQueuedRuns();
+      const stored = await getRunStore().getRun(runId);
+      if (stored?.run.status === 'queued') {
+        await emitRunEvent(
+          runId,
+          'run.log',
+          `[worker] Dispatcher processed ${result.processed} queued job(s), but this run is still waiting. It will retry on the next platform trigger.`
+        );
+      }
     } catch (error) {
+      const message = redactSecrets(error instanceof Error ? error.message : String(error));
+      try {
+        await getRunStore().updateRun(runId, {
+          status: 'failed',
+          completedAt: new Date().toISOString(),
+          errorCode: 'WorkerDispatchFailed',
+          errorMessage: message,
+        });
+        await emitRunEvent(runId, 'run.failed', `Worker dispatch failed: ${message}`, {
+          errorCode: 'WorkerDispatchFailed',
+        });
+      } catch (eventError) {
+        console.error('Unable to persist worker dispatch failure', eventError);
+      }
       console.error('Post-response worker dispatch failed', error);
     }
   });
