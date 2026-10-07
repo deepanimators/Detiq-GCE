@@ -63,8 +63,13 @@ export async function getRunObjectWithEtag(key: string): Promise<{ body: string,
   try {
     const { content, etag } = await adapter.download(`${getPlatformPrefix()}/${key}`);
     return { body: content.toString('utf8'), etag: etag ?? '' };
-  } catch (error) {
-    if ((error as any).code === 'NoSuchKey' || (error as any).code === 'NotFound' || (error as any).httpStatus === 404) {
+  } catch (error: any) {
+    if (
+      error.code === 'NoSuchKey' ||
+      error.code === 'NotFound' ||
+      error.httpStatus === 404 ||
+      (error.message && error.message.includes('NotFound'))
+    ) {
       return null;
     }
     throw error;
