@@ -21,6 +21,7 @@ type ActiveRun = {
 type WorkerExecutionResult = {
   completed: boolean;
   remainingRepositories: Repo[];
+  availableAt?: string;
 };
 
 const TERMINAL_STATUSES = new Set(['preflight_failed', 'completed', 'partial', 'failed', 'cancelled']);
@@ -107,6 +108,7 @@ export async function processNextQueuedRun(
         repositories: result.remainingRepositories,
         totalRepositories: job.totalRepositories ?? job.repositories.length,
         enqueuedAt: new Date().toISOString(),
+        availableAt: result.availableAt,
       });
     }
   } catch (error) {
@@ -192,6 +194,26 @@ async function executeRun(
     const summary = await withRunTimeout(extraction, controller, runTimeoutMs());
 
     await logChain;
+
+    const retryAfterRateLimit = getRetryAfterRateLimit(summary.rateLimitResetAt);
+    const retryRepositories = retryAfterRateLimit && summary.successRepos === 0
+      ? [...chunk, ...remainingRepositories]
+      : remainingRepositories;
+    if (retryAfterRateLimit && retryRepositories.length > 0) {
+      await store.updateRun(runId, {
+        status: 'queued',
+        completedRepos: completedBefore + summary.successRepos,
+        errorCode: 'GitHubRateLimited',
+        errorMessage: `GitHub API rate limit exhausted. Retrying after ${retryAfterRateLimit}.`,
+      });
+      await emitRunEvent(
+        runId,
+        'run.queued',
+        `GitHub API rate limit exhausted. Worker paused this run until ${retryAfterRateLimit}.`,
+        { errorCode: 'GitHubRateLimited' }
+      );
+      return { completed: false, remainingRepositories: retryRepositories, availableAt: retryAfterRateLimit };
+    }
 
     const completedRepos = completedBefore + summary.successRepos;
     const failedRepos = failedBefore + Math.max(0, summary.totalRepos - summary.successRepos);
@@ -279,4 +301,12 @@ function runTimeoutMs(): number {
 function workerRepoChunkSize(): number {
   const fallback = isVercelRuntime() ? 1 : Number.MAX_SAFE_INTEGER;
   return positiveInteger(Number(process.env.WORKER_REPO_CHUNK_SIZE ?? fallback), fallback);
+}
+
+function getRetryAfterRateLimit(resetAt?: string): string | null {
+  if (!resetAt) return null;
+  const resetMs = Date.parse(resetAt);
+  if (!Number.isFinite(resetMs) || resetMs <= Date.now()) return null;
+  const bufferSeconds = positiveInteger(Number(process.env.GITHUB_RATE_LIMIT_RETRY_BUFFER_SECONDS ?? 30), 30);
+  return new Date(resetMs + bufferSeconds * 1000).toISOString();
 }

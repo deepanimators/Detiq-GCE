@@ -112,7 +112,7 @@ function dispatchWorkerAfterResponse(runId: string): void {
           'run.log',
           result.preferredRunClaimed
             ? `[worker] Dispatcher processed ${result.processed} queued job(s), but this run is still waiting. It will retry on the next platform trigger.`
-            : '[worker] Dispatcher could not claim this run yet. A previous worker lease may still be active; it will retry automatically.'
+            : '[worker] Dispatcher could not claim this run yet. It may be waiting for a scheduled retry window or a previous worker lease; it will retry automatically.'
         );
       }
     } catch (error) {

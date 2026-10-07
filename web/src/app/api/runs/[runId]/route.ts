@@ -81,7 +81,7 @@ function nudgeQueuedWorker(runId: string): void {
           'run.log',
           result.preferredRunClaimed
             ? `[worker] Poll nudge processed ${result.processed} queued job(s), but this run is still waiting.`
-            : '[worker] Poll nudge could not claim this run yet. A previous worker lease may still be active.'
+            : '[worker] Poll nudge could not claim this run yet. It may be waiting for a scheduled retry window or a previous worker lease.'
         );
       }
     } catch (error) {

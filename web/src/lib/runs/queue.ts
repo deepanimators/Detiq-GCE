@@ -100,7 +100,12 @@ export async function claimRun(options: {
         await deleteRunObject(claimKey);
         continue;
       }
-      return { job: decrypt(value), token };
+      const job = decrypt(value);
+      if (job.availableAt && Date.parse(job.availableAt) > Date.now()) {
+        await deleteRunObject(claimKey);
+        continue;
+      }
+      return { job, token };
     } catch (error) {
       if (isAlreadyClaimed(error)) continue;
       throw error;

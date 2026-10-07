@@ -1,5 +1,5 @@
 import pLimit from 'p-limit';
-import { formatGitHubError, GitHubClient, type Repo, type ListRepoOptions } from '@/lib/github';
+import { formatGitHubError, getGitHubErrorDetails, GitHubClient, type Repo, type ListRepoOptions } from '@/lib/github';
 import type { StorageAdapter } from '@/lib/adapters/base';
 import { getMimeType } from '@/lib/mime';
 import { MetadataExtractor, parseMetadataTypes, type MetadataOptions } from '@/lib/metadata';
@@ -40,6 +40,7 @@ export type ExtractionSummary = {
   uploadedFiles: number;
   skippedFiles: number;
   failedFiles: number;
+  rateLimitResetAt?: string;
 };
 
 export async function runExtraction(req: ExtractionRequest): Promise<ExtractionSummary> {
@@ -107,7 +108,11 @@ export async function runExtraction(req: ExtractionRequest): Promise<ExtractionS
   summary.successRepos = results.filter((r) => r.status === 'fulfilled').length;
   results
     .filter((r): r is PromiseRejectedResult => r.status === 'rejected')
-    .forEach((f) => onLog(`[error] Repo failed: ${formatGitHubError(f.reason)}`));
+    .forEach((f) => {
+      const resetAt = getRateLimitResetAt(f.reason);
+      if (resetAt) summary.rateLimitResetAt = maxIsoTimestamp(summary.rateLimitResetAt, resetAt);
+      onLog(`[error] Repo failed: ${formatGitHubError(f.reason)}`);
+    });
 
   onLog('');
   onLog('=== Summary ===');
@@ -166,6 +171,7 @@ async function processRepo(args: {
     let uploaded = 0;
     let failed = 0;
     let fatalContentErrorMessage: string | null = null;
+    let fatalContentError: unknown = null;
 
     const fileResults = await Promise.allSettled(
       files.map((file) =>
@@ -178,6 +184,11 @@ async function processRepo(args: {
             content = await client.getFileContent(repo.owner, repo.name, file.sha);
           } catch (error) {
             const message = formatGitHubError(error);
+            if (getRateLimitResetAt(error)) {
+              fatalContentError = error;
+              fatalContentErrorMessage = `${message} Stopping ${label} until the GitHub rate-limit window resets.`;
+              throw error;
+            }
             if (message.includes('(403)')) {
               fatalContentErrorMessage = `${message} Stopping ${label} to avoid repeating the same GitHub failure for every file.`;
               throw new Error(fatalContentErrorMessage);
@@ -207,6 +218,7 @@ async function processRepo(args: {
 
     if (fatalContentErrorMessage) {
       onLog(`  [error] ${fatalContentErrorMessage}`);
+      if (fatalContentError) throw fatalContentError;
       throw new Error(fatalContentErrorMessage);
     }
 
@@ -232,6 +244,22 @@ async function processRepo(args: {
 
   summary.successRepos += 1;
   req.onRepoComplete?.({ ...summary });
+}
+
+function getRateLimitResetAt(error: unknown): string | undefined {
+  const details = getGitHubErrorDetails(error);
+  if (details.status === 403 && details.rateLimitRemaining === 0 && details.rateLimitReset) {
+    return new Date(details.rateLimitReset * 1000).toISOString();
+  }
+
+  const message = error instanceof Error ? error.message : String(error);
+  const match = message.match(/Reset:\s*([0-9TZ:.-]+)\.?/i);
+  return match?.[1];
+}
+
+function maxIsoTimestamp(current: string | undefined, next: string): string {
+  if (!current) return next;
+  return Date.parse(next) > Date.parse(current) ? next : current;
 }
 
 function throwIfAborted(signal?: AbortSignal): void {
