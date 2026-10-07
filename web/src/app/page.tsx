@@ -465,13 +465,16 @@ export default function Home() {
   const [credentialSaveStatus, setCredentialSaveStatus] = useState<CredentialStatusMap>({});
   const [logActionStatus, setLogActionStatus] = useState('');
   const [runCacheStatus, setRunCacheStatus] = useState('');
-  const logsEndRef = useRef<HTMLDivElement>(null);
+  const logScrollRef = useRef<HTMLDivElement>(null);
   const activeWatcherRef = useRef<string | null>(null);
 
   const addLog = useCallback((msg: string) => {
     setLogs((prev) => {
       if (isRoutineLogLine(msg) && prev.slice(-8).includes(msg)) return prev;
-      setTimeout(() => logsEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 0);
+      setTimeout(() => {
+        const scroller = logScrollRef.current;
+        scroller?.scrollTo({ top: scroller.scrollHeight, behavior: 'smooth' });
+      }, 0);
       return [...prev, msg];
     });
   }, []);
@@ -1051,7 +1054,7 @@ export default function Home() {
         </div>
       </header>
 
-      <main className="max-w-6xl mx-auto px-4 sm:px-6 py-8 grid grid-cols-1 xl:grid-cols-[minmax(0,500px)_minmax(0,1fr)] gap-6 items-start">
+      <main className="max-w-6xl mx-auto px-4 sm:px-6 py-8 grid grid-cols-1 xl:grid-cols-[minmax(0,500px)_minmax(0,1fr)] gap-6 items-start [overflow-anchor:none]">
 
         {/* ── Left: config ──────────────────────────────────────────────── */}
         <div className="space-y-4 min-w-0">
@@ -1402,7 +1405,7 @@ export default function Home() {
             </div>
           )}
 
-          <div className="flex-1 overflow-y-auto p-4 pb-6 font-mono text-xs text-zinc-600 dark:text-zinc-400 space-y-0.5 min-h-0">
+          <div ref={logScrollRef} className="flex-1 overflow-y-auto p-4 pb-6 font-mono text-xs text-zinc-600 dark:text-zinc-400 space-y-0.5 min-h-0 [overflow-anchor:none]">
             {logs.length === 0 && !running && (
               <p className="text-zinc-400 text-center mt-20 font-sans text-sm">
                 Configure source + storage targets, then click Start.
@@ -1438,7 +1441,6 @@ export default function Home() {
                 </div>
               </details>
             )}
-            <div ref={logsEndRef} />
           </div>
 
           {summary && (
