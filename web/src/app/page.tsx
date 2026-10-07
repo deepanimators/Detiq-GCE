@@ -112,6 +112,24 @@ function isTerminalRunStatus(status: RunStatus) {
   return TERMINAL_RUN_STATUSES.has(status);
 }
 
+function isRoutineLogLine(log: string) {
+  return log.startsWith('[worker]') ||
+    log.startsWith('Live events disconnected') ||
+    log.startsWith('[run.created]') ||
+    log.startsWith('[run.queued]');
+}
+
+function latestStatusLine(logs: string[]) {
+  return logs.findLast((log) =>
+    log.startsWith('[worker]') ||
+    log.startsWith('Live events disconnected') ||
+    log.startsWith('[run.started]') ||
+    log.startsWith('[run.failed]') ||
+    log.startsWith('[run.completed]') ||
+    log.startsWith('[run.partial]')
+  );
+}
+
 // ── Shared UI components ──────────────────────────────────────────────────────
 
 function Field({
@@ -378,6 +396,7 @@ export default function Home() {
   const [loadingRepositories, setLoadingRepositories] = useState(false);
   const [repositoryError, setRepositoryError] = useState('');
   const [loadingBranches, setLoadingBranches] = useState<string | null>(null);
+  const [repoListOpen, setRepoListOpen] = useState(false);
 
   // Filters
   const [skipForks, setSkipForks] = useState(false);
@@ -713,6 +732,7 @@ export default function Home() {
       setRepositories(next);
       setSelectedRepositories(new Set(next.map((repo) => repo.name)));
       setBranchOverrides(Object.fromEntries(next.map((repo) => [repo.name, repo.defaultBranch])));
+      setRepoListOpen(false);
     } catch (error) {
       setRepositoryError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -981,6 +1001,16 @@ export default function Home() {
   );
   const actualError = summarizeActualError(logs, currentRun);
   const queuedNeedsWorker = running && currentRun?.status === 'queued';
+  const filteredRepositories = repositories.filter((repo) => {
+    const query = repoSearch.toLowerCase();
+    return !query || repo.name.toLowerCase().includes(query) || repo.topics.some((topic) => topic.toLowerCase().includes(query));
+  });
+  const selectedRepositoryNames = repositories
+    .filter((repo) => selectedRepositories.has(repo.name))
+    .map((repo) => repo.name);
+  const hiddenRoutineLogCount = logs.filter(isRoutineLogLine).length;
+  const visibleLogs = logs.filter((log) => !isRoutineLogLine(log));
+  const workerStatusLine = latestStatusLine(logs);
 
   return (
     <div className="min-h-screen bg-zinc-50 dark:bg-zinc-950 font-sans">
@@ -1062,32 +1092,69 @@ export default function Home() {
             {repositoryError && <p role="alert" className="text-xs text-red-600">{repositoryError}</p>}
             {repositories.length > 0 && (
               <div className="space-y-2">
-                <div className="flex items-center justify-between gap-2">
-                  <Field label="Search repositories" value={repoSearch} onChange={setRepoSearch} placeholder="Filter by name or topic" />
-                  <span className="text-xs text-zinc-500 whitespace-nowrap">{selectedRepositories.size}/{repositories.length} selected</span>
-                </div>
-                <div className="max-h-72 overflow-auto rounded-lg border border-zinc-200 dark:border-zinc-700 divide-y divide-zinc-100 dark:divide-zinc-800">
-                  {repositories.filter((repo) => {
-                    const query = repoSearch.toLowerCase();
-                    return !query || repo.name.toLowerCase().includes(query) || repo.topics.some((topic) => topic.toLowerCase().includes(query));
-                  }).map((repo) => (
-                    <div key={repo.name} className="flex items-center gap-3 px-3 py-2">
-                      <input type="checkbox" checked={selectedRepositories.has(repo.name)}
-                        onChange={() => toggleRepository(repo.name)} aria-label={`Select ${repo.name}`} />
-                      <div className="min-w-0 flex-1">
-                        <p className="text-sm text-zinc-800 dark:text-zinc-200 truncate">{repo.name}</p>
-                        <p className="text-[11px] text-zinc-400">{repo.isPrivate ? 'Private' : 'Public'} · default: {repo.defaultBranch}</p>
-                      </div>
-                      <input list={`branches-${repo.name}`} className="w-36 px-2 py-1 text-xs rounded border border-zinc-200 dark:border-zinc-700 bg-transparent"
-                        value={branchOverrides[repo.name] ?? repo.defaultBranch}
-                        onFocus={() => void loadBranches(repo)}
-                        onChange={(event) => setBranchOverrides((current) => ({ ...current, [repo.name]: event.target.value }))}
-                        aria-label={`Branch for ${repo.name}`} />
-                      <datalist id={`branches-${repo.name}`}>
-                        {(repo.branches ?? [repo.defaultBranch]).map((branch) => <option key={branch} value={branch} />)}
-                      </datalist>
+                <div className="rounded-lg border border-zinc-200 dark:border-zinc-700 bg-zinc-50/70 dark:bg-zinc-900/60 p-3 space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <p className="text-sm font-medium text-zinc-800 dark:text-zinc-200">
+                        {selectedRepositories.size}/{repositories.length} repositories selected
+                      </p>
+                      <p className="text-xs text-zinc-400">
+                        {repoListOpen ? `${filteredRepositories.length} shown after filters.` : 'Repository rows are collapsed to keep the page short.'}
+                      </p>
                     </div>
-                  ))}
+                    <button
+                      type="button"
+                      onClick={() => setRepoListOpen((open) => !open)}
+                      className="px-3 py-1.5 text-xs rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+                      aria-expanded={repoListOpen}
+                    >
+                      {repoListOpen ? 'Hide list' : 'Review selection'}
+                    </button>
+                  </div>
+
+                  {!repoListOpen && (
+                    <div className="flex flex-wrap gap-1.5">
+                      {selectedRepositoryNames.slice(0, 4).map((name) => (
+                        <span key={name} className="max-w-full truncate rounded-md bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 px-2 py-1 text-xs text-zinc-600 dark:text-zinc-300">
+                          {name}
+                        </span>
+                      ))}
+                      {selectedRepositoryNames.length > 4 && (
+                        <span className="rounded-md bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 px-2 py-1 text-xs text-zinc-500">
+                          +{selectedRepositoryNames.length - 4} more
+                        </span>
+                      )}
+                    </div>
+                  )}
+
+                  {repoListOpen && (
+                    <div className="space-y-2">
+                      <div className="grid grid-cols-[minmax(0,1fr)_auto] items-end gap-2">
+                        <Field label="Search repositories" value={repoSearch} onChange={setRepoSearch} placeholder="Filter by name or topic" />
+                        <span className="pb-2 text-xs text-zinc-500 whitespace-nowrap">{filteredRepositories.length} shown</span>
+                      </div>
+                      <div className="max-h-56 overflow-auto rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 divide-y divide-zinc-100 dark:divide-zinc-800">
+                        {filteredRepositories.map((repo) => (
+                          <div key={repo.name} className="grid grid-cols-[auto_minmax(0,1fr)] sm:grid-cols-[auto_minmax(0,1fr)_9rem] items-center gap-3 px-3 py-2">
+                            <input type="checkbox" checked={selectedRepositories.has(repo.name)}
+                              onChange={() => toggleRepository(repo.name)} aria-label={`Select ${repo.name}`} />
+                            <div className="min-w-0">
+                              <p className="text-sm text-zinc-800 dark:text-zinc-200 truncate">{repo.name}</p>
+                              <p className="text-[11px] text-zinc-400 truncate">{repo.isPrivate ? 'Private' : 'Public'} · default: {repo.defaultBranch}</p>
+                            </div>
+                            <input list={`branches-${repo.name}`} className="col-span-2 sm:col-span-1 w-full px-2 py-1 text-xs rounded border border-zinc-200 dark:border-zinc-700 bg-transparent"
+                              value={branchOverrides[repo.name] ?? repo.defaultBranch}
+                              onFocus={() => void loadBranches(repo)}
+                              onChange={(event) => setBranchOverrides((current) => ({ ...current, [repo.name]: event.target.value }))}
+                              aria-label={`Branch for ${repo.name}`} />
+                            <datalist id={`branches-${repo.name}`}>
+                              {(repo.branches ?? [repo.defaultBranch]).map((branch) => <option key={branch} value={branch} />)}
+                            </datalist>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
             )}
@@ -1291,11 +1358,16 @@ export default function Home() {
             </div>
           </div>
 
-          {(queuedNeedsWorker || actualError || logActionStatus || runCacheStatus) && (
+          {(queuedNeedsWorker || actualError || logActionStatus || runCacheStatus || workerStatusLine) && (
             <div className="border-b border-zinc-100 dark:border-zinc-800 px-4 py-3 flex-shrink-0 space-y-1 bg-zinc-50 dark:bg-zinc-900">
               {queuedNeedsWorker && (
                 <p className="text-xs text-amber-600 dark:text-amber-400 break-words">
                   <span className="font-semibold">Waiting for worker:</span> the platform worker has not claimed this run yet. It should start automatically; if it does not, contact the platform administrator.
+                </p>
+              )}
+              {workerStatusLine && (
+                <p className="text-xs text-zinc-600 dark:text-zinc-300 break-words">
+                  <span className="font-semibold">Worker status:</span> {workerStatusLine.replace(/^\[worker\]\s*/, '')}
                 </p>
               )}
               {actualError && (
@@ -1318,7 +1390,12 @@ export default function Home() {
                 Configure source + storage targets, then click Start.
               </p>
             )}
-            {logs.map((log, i) => (
+            {visibleLogs.length === 0 && logs.length > 0 && (
+              <p className="text-zinc-400 text-center mt-20 font-sans text-sm">
+                Only routine platform messages so far.
+              </p>
+            )}
+            {visibleLogs.map((log, i) => (
               <div key={i} className={
                 log.startsWith('ERROR') ? 'text-red-500' :
                 log.startsWith('[done]') ? 'text-emerald-600 dark:text-emerald-400' :
@@ -1331,6 +1408,18 @@ export default function Home() {
                 {log}
               </div>
             ))}
+            {hiddenRoutineLogCount > 0 && (
+              <details className="mt-3 rounded-lg border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950 p-3 font-sans">
+                <summary className="cursor-pointer text-xs text-zinc-500 dark:text-zinc-400">
+                  Show {hiddenRoutineLogCount} routine platform message{hiddenRoutineLogCount === 1 ? '' : 's'}
+                </summary>
+                <div className="mt-2 space-y-0.5 font-mono text-xs text-zinc-500 dark:text-zinc-400">
+                  {logs.filter(isRoutineLogLine).map((log, i) => (
+                    <div key={`${i}-${log}`} className="break-words">{log}</div>
+                  ))}
+                </div>
+              </details>
+            )}
             <div ref={logsEndRef} />
           </div>
 
