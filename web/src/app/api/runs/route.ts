@@ -13,12 +13,24 @@ import { processQueuedRuns, queueRun } from '@/lib/runs/worker';
 import { formatGitHubError, getGitHubErrorDetails } from '@/lib/github';
 import { redactSecrets } from '@/lib/adapters/base';
 
+import { getSession } from '@/lib/auth/session';
+
 export const runtime = 'nodejs';
 export const maxDuration = 300;
 
 export async function POST(req: Request) {
   try {
-    const payload = parseRunCreatePayload(await req.json());
+    const rawPayload = await req.json();
+    
+    // Inject session token if pat is missing
+    if (!rawPayload.pat) {
+      const session = await getSession();
+      if (session?.githubToken) {
+        rawPayload.pat = session.githubToken;
+      }
+    }
+
+    const payload = parseRunCreatePayload(rawPayload);
     const adapterNames = adapterNamesFromConfig(payload.adapters);
     const store = getRunStore();
     const run = await store.createRun(createRunRecord({

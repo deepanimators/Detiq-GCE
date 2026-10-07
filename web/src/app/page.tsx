@@ -392,6 +392,16 @@ export default function Home() {
   const [targetType, setTargetType] = useState<'user' | 'org'>('org');
   const [targetName, setTargetName] = useState('');
   const [visibility, setVisibility] = useState<'all' | 'public' | 'private'>('all');
+
+  // Auth State
+  const [auth, setAuth] = useState<{ authenticated: boolean; user?: { login: string; avatar_url: string }; hasToken?: boolean } | null>(null);
+
+  useEffect(() => {
+    fetch('/api/auth/me')
+      .then((res) => res.json())
+      .then((data) => setAuth(data))
+      .catch((err) => console.error('Failed to fetch auth', err));
+  }, []);
   const [repositories, setRepositories] = useState<RepositoryChoice[]>([]);
   const [selectedRepositories, setSelectedRepositories] = useState<Set<string>>(new Set());
   const [branchOverrides, setBranchOverrides] = useState<Record<string, string>>({});
@@ -726,7 +736,7 @@ export default function Home() {
   }
 
   async function fetchRepositories() {
-    if (!pat || !targetName) return;
+    if ((!pat && !auth?.hasToken) || !targetName) return;
     setLoadingRepositories(true);
     setRepositoryError('');
     const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
@@ -1018,7 +1028,7 @@ export default function Home() {
   }
 
   const canRun = Boolean(
-    pat &&
+    (pat || auth?.hasToken) &&
     targetName &&
     repositories.length > 0 &&
     selectedRepositories.size > 0 &&
@@ -1051,10 +1061,25 @@ export default function Home() {
               <span className="text-xs text-zinc-400 ml-2">GitHub Codebase Extractor</span>
             </div>
           </div>
-          <a href="https://github.com/deepanimators/Detiq-GCE" target="_blank" rel="noopener noreferrer"
-            className="text-xs text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200">
-            GitHub ↗
-          </a>
+          <div className="flex items-center gap-4">
+            <a href="https://github.com/deepanimators/Detiq-GCE" target="_blank" rel="noopener noreferrer"
+              className="text-xs text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200">
+              GitHub ↗
+            </a>
+            {auth?.authenticated && auth.user ? (
+              <div className="flex items-center gap-3">
+                <img src={auth.user.avatar_url} alt={auth.user.login} className="w-6 h-6 rounded-full" />
+                <span className="text-xs text-zinc-600 dark:text-zinc-300">{auth.user.login}</span>
+                <form action="/api/auth/logout" method="POST">
+                  <button type="submit" className="text-xs text-red-500 hover:text-red-700">Logout</button>
+                </form>
+              </div>
+            ) : (
+              <a href="/api/auth/github" className="text-xs bg-zinc-900 dark:bg-white text-white dark:text-zinc-900 px-3 py-1.5 rounded-lg font-medium hover:opacity-90">
+                Login with GitHub
+              </a>
+            )}
+          </div>
         </div>
       </header>
 
@@ -1119,7 +1144,7 @@ export default function Home() {
               </div>
               <button type="button" onClick={fetchRepositories}
                 className="px-3 py-2 text-xs rounded-lg border border-zinc-200 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800"
-                disabled={!pat || !targetName || loadingRepositories}>
+                disabled={(!pat && !auth?.hasToken) || !targetName || loadingRepositories}>
                 {loadingRepositories ? 'Fetching…' : 'Fetch repositories'}
               </button>
             </div>
