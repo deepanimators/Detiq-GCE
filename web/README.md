@@ -23,6 +23,9 @@ Current API surface:
 - `GET /api/runs/{runId}` returns run state and event history.
 - `GET /api/runs/{runId}/events` streams replayable SSE events from a cursor.
 - `POST /api/runs/{runId}/cancel` requests cancellation for active runs.
+- `POST /api/cron` requires `targetType` and `targetName` in the authenticated
+  request body; the target is supplied by the caller rather than hardcoded in
+  deployment environment variables.
 
 By default, local run state is written to `.detiq-runs/`. Set `RUN_STATE_DIR` to move
 it elsewhere. Vercel deployments use the configured S3-compatible destination

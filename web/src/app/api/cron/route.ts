@@ -29,16 +29,33 @@ export async function POST(req: Request) {
     return Response.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
-  const pat = process.env.GITHUB_PAT;
-  const targetType = (process.env.CRON_TARGET_TYPE ?? 'org') as 'user' | 'org';
-  const targetName = process.env.CRON_TARGET_NAME;
+  const body = await readJsonBody(req);
+  const pat = typeof body.pat === 'string' && body.pat.trim() ? body.pat : process.env.GITHUB_PAT;
+  const targetType = body.targetType === 'user' || body.targetType === 'org'
+    ? body.targetType
+    : undefined;
+  const targetName = typeof body.targetName === 'string' ? body.targetName.trim() : '';
 
   if (!pat) return Response.json({ error: 'GITHUB_PAT not set' }, { status: 500 });
-  if (!targetName) return Response.json({ error: 'CRON_TARGET_NAME not set' }, { status: 500 });
+  if (!targetType || !targetName) {
+    return Response.json(
+      { error: 'targetType and targetName are required in the request body' },
+      { status: 400 }
+    );
+  }
 
   const adapters = buildAdaptersFromEnv();
   if (!adapters.length && process.env.CRON_DRY_RUN !== 'true') {
     return Response.json({ error: 'No storage adapters configured in env' }, { status: 500 });
+  }
+
+  async function readJsonBody(req: Request): Promise<Record<string, unknown>> {
+    try {
+      const body = await req.json();
+      return body && typeof body === 'object' ? body as Record<string, unknown> : {};
+    } catch {
+      return {};
+    }
   }
 
   const logs: string[] = [];
