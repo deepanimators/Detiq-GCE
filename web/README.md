@@ -38,10 +38,12 @@ it elsewhere. Vercel deployments use the configured S3-compatible destination
 (Cloudflare R2 or Amazon S3) for run records and queued jobs, so no Redis service is
 required. Configure the matching `R2_*` or `S3_*` variables,
 `RUN_QUEUE_ENCRYPTION_KEY`, and `CRON_SECRET` in Vercel. The committed
-`vercel.json` invokes `/api/worker` every minute; Vercel sends `CRON_SECRET` as a
-Bearer token for those cron calls. `POST /api/runs` also schedules a best-effort
-post-response worker dispatch, so users do not need to know or enter any platform
-secret. `WORKER_SECRET` is optional for non-Vercel external worker runtimes.
+`vercel.json` invokes `/api/worker` once per day so Hobby deployments pass Vercel's
+Cron limits; on Pro, the schedule can be changed to `* * * * *` for a once-per-minute
+recovery sweep. Vercel sends `CRON_SECRET` as a Bearer token for cron calls.
+`POST /api/runs` schedules a best-effort post-response worker dispatch, so users do
+not need to know or enter any platform secret. `WORKER_SECRET` is optional for
+non-Vercel external worker runtimes.
 Queue claims use a lease (`RUN_QUEUE_LEASE_SECONDS`, default 900) so abandoned
 claims can be reclaimed by a later worker. `DIRECT_RUN_REPO_LIMIT` only applies to
 non-Vercel local development.
