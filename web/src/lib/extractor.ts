@@ -1,6 +1,6 @@
 import pLimit from 'p-limit';
 import { formatGitHubError, getGitHubErrorDetails, GitHubClient, type Repo, type ListRepoOptions } from '@/lib/github';
-import type { StorageAdapter } from '@/lib/adapters/base';
+import { isDurableStorageAdapter, type StorageAdapter } from '@/lib/adapters/base';
 import { getMimeType } from '@/lib/mime';
 import { MetadataExtractor, parseMetadataTypes, type MetadataOptions } from '@/lib/metadata';
 
@@ -40,7 +40,21 @@ export type ExtractionSummary = {
   uploadedFiles: number;
   skippedFiles: number;
   failedFiles: number;
+  totalFolders: number;
+  uploadedFolders: number;
+  skippedExistingFiles: number;
+  skippedExistingFolders: number;
   rateLimitResetAt?: string;
+};
+
+type RepoProgress = {
+  discoveredFiles: number;
+  discoveredFolders: number;
+  uploadedFiles: number;
+  uploadedFolders: Set<string>;
+  skippedExistingFiles: number;
+  skippedExistingFolders: Set<string>;
+  failedFiles: number;
 };
 
 export async function runExtraction(req: ExtractionRequest): Promise<ExtractionSummary> {
@@ -72,7 +86,7 @@ export async function runExtraction(req: ExtractionRequest): Promise<ExtractionS
 
   if (!repos.length) {
     onLog('No repos found — check PAT permissions and filters');
-    return { totalRepos: 0, successRepos: 0, totalFiles: 0, uploadedFiles: 0, skippedFiles: 0, failedFiles: 0 };
+    return createEmptySummary(0);
   }
 
   const adapterNames = adapters.map((a) => a.name).join(', ');
@@ -91,8 +105,7 @@ export async function runExtraction(req: ExtractionRequest): Promise<ExtractionS
   }
 
   const summary: ExtractionSummary = {
-    totalRepos: repos.length, successRepos: 0,
-    totalFiles: 0, uploadedFiles: 0, skippedFiles: 0, failedFiles: 0,
+    ...createEmptySummary(repos.length),
   };
 
   const repoLimit = pLimit(repoConcurrency);
@@ -118,6 +131,10 @@ export async function runExtraction(req: ExtractionRequest): Promise<ExtractionS
   onLog('=== Summary ===');
   onLog(`Repos:  ${summary.successRepos}/${summary.totalRepos} succeeded`);
   onLog(`Files:  ${summary.uploadedFiles} uploaded, ${summary.skippedFiles} skipped, ${summary.failedFiles} failed`);
+  onLog(`Folders: ${summary.uploadedFolders}/${summary.totalFolders} with copied files${summary.skippedExistingFolders ? `, ${summary.skippedExistingFolders} already complete` : ''}`);
+  if (summary.skippedExistingFiles) {
+    onLog(`Resume: ${summary.skippedExistingFiles} existing file${summary.skippedExistingFiles === 1 ? '' : 's'} skipped from destination checkpoint.`);
+  }
   if (dryRun) onLog('(dry-run: no files uploaded)');
 
   return summary;
@@ -141,6 +158,7 @@ async function processRepo(args: {
 
   throwIfAborted(req.signal);
   onLog(`[start] ${label}`);
+  const progress = createRepoProgress();
 
   let files = await client.getFileTree(repo.owner, repo.name, repo.defaultBranch);
   throwIfAborted(req.signal);
@@ -161,15 +179,20 @@ async function processRepo(args: {
   }
 
   summary.totalFiles += files.length;
-  onLog(`  ${files.length} files in ${label}`);
+  progress.discoveredFiles = files.length;
+  progress.discoveredFolders = countFolders(files.map((file) => file.path));
+  summary.totalFolders += progress.discoveredFolders;
+  onLog(`  Plan: ${files.length} files across ${progress.discoveredFolders} folder${progress.discoveredFolders === 1 ? '' : 's'} in ${label}`);
 
   if (dryRun) {
     summary.uploadedFiles += files.length;
+    summary.uploadedFolders += progress.discoveredFolders;
+    progress.uploadedFiles += files.length;
+    progress.uploadedFolders = new Set(files.map((file) => folderKey(file.path)));
     onLog(`[done] ${label} (dry-run)`);
   } else {
     const fileLimit = pLimit(fileConcurrency);
     let uploaded = 0;
-    let failed = 0;
     let fatalContentErrorMessage: string | null = null;
     let fatalContentError: unknown = null;
 
@@ -180,6 +203,15 @@ async function processRepo(args: {
           throwIfAborted(req.signal);
           const storagePath = `${repo.owner}/${repo.name}/${file.path}`;
           let content: Buffer;
+          const pendingAdapters = await adaptersMissingFile(adapters, storagePath, file.size);
+          if (!pendingAdapters.length) {
+            progress.skippedExistingFiles++;
+            progress.skippedExistingFolders.add(folderKey(file.path));
+            if (progress.skippedExistingFiles % 100 === 0) {
+              onLog(`  Resume skip: ${progress.skippedExistingFiles}/${files.length} already copied in ${label}`);
+            }
+            return;
+          }
           try {
             content = await client.getFileContent(repo.owner, repo.name, file.sha);
           } catch (error) {
@@ -196,7 +228,7 @@ async function processRepo(args: {
             throw error;
           }
           throwIfAborted(req.signal);
-          await Promise.all(adapters.map(async (a) => {
+          await Promise.all(pendingAdapters.map(async (a) => {
             try {
               await a.upload(storagePath, content, getMimeType(file.path));
             } catch (error) {
@@ -204,6 +236,8 @@ async function processRepo(args: {
             }
           }));
           uploaded++;
+          progress.uploadedFiles++;
+          progress.uploadedFolders.add(folderKey(file.path));
           if (uploaded % 50 === 0) onLog(`  Progress: ${uploaded}/${files.length} in ${label}`);
         })
       )
@@ -211,20 +245,21 @@ async function processRepo(args: {
 
     fileResults.forEach((r, i) => {
       if (r.status === 'rejected') {
-        failed++;
+        progress.failedFiles++;
         onLog(`  [warn] File failed: ${files[i]?.path} — ${formatError(r.reason)}`);
       }
     });
 
     if (fatalContentErrorMessage) {
       onLog(`  [error] ${fatalContentErrorMessage}`);
+      applyRepoProgressToSummary(summary, progress);
+      logRepoProgress(label, progress, onLog, '[progress]');
       if (fatalContentError) throw fatalContentError;
       throw new Error(fatalContentErrorMessage);
     }
 
-    summary.uploadedFiles += uploaded;
-    summary.failedFiles += failed;
-    onLog(`[done] ${label} — ${uploaded} uploaded${failed ? `, ${failed} failed` : ''}`);
+    applyRepoProgressToSummary(summary, progress);
+    logRepoProgress(label, progress, onLog, '[done]');
   }
 
   function formatError(error: unknown): string {
@@ -244,6 +279,78 @@ async function processRepo(args: {
 
   summary.successRepos += 1;
   req.onRepoComplete?.({ ...summary });
+}
+
+async function adaptersMissingFile(
+  adapters: StorageAdapter[],
+  storagePath: string,
+  expectedSize: number
+): Promise<StorageAdapter[]> {
+  const checks = await Promise.all(adapters.map(async (adapter) => {
+    if (!isDurableStorageAdapter(adapter)) return { adapter, exists: false };
+    const head = await adapter.head(storagePath);
+    return { adapter, exists: head.exists && (head.size === undefined || head.size === expectedSize) };
+  }));
+
+  return checks.filter((check) => !check.exists).map((check) => check.adapter);
+}
+
+function createEmptySummary(totalRepos: number): ExtractionSummary {
+  return {
+    totalRepos,
+    successRepos: 0,
+    totalFiles: 0,
+    uploadedFiles: 0,
+    skippedFiles: 0,
+    failedFiles: 0,
+    totalFolders: 0,
+    uploadedFolders: 0,
+    skippedExistingFiles: 0,
+    skippedExistingFolders: 0,
+  };
+}
+
+function createRepoProgress(): RepoProgress {
+  return {
+    discoveredFiles: 0,
+    discoveredFolders: 0,
+    uploadedFiles: 0,
+    uploadedFolders: new Set<string>(),
+    skippedExistingFiles: 0,
+    skippedExistingFolders: new Set<string>(),
+    failedFiles: 0,
+  };
+}
+
+function logRepoProgress(
+  label: string,
+  progress: RepoProgress,
+  onLog: (msg: string) => void,
+  prefix: '[done]' | '[progress]'
+): void {
+  onLog(
+    `${prefix} ${label} — ${progress.uploadedFiles} copied across ${progress.uploadedFolders.size} folder${progress.uploadedFolders.size === 1 ? '' : 's'}, ` +
+    `${progress.skippedExistingFiles} already copied across ${progress.skippedExistingFolders.size} folder${progress.skippedExistingFolders.size === 1 ? '' : 's'}, ` +
+    `${progress.failedFiles} failed of ${progress.discoveredFiles} planned files`
+  );
+}
+
+function applyRepoProgressToSummary(summary: ExtractionSummary, progress: RepoProgress): void {
+  summary.uploadedFiles += progress.uploadedFiles;
+  summary.uploadedFolders += progress.uploadedFolders.size;
+  summary.skippedExistingFiles += progress.skippedExistingFiles;
+  summary.skippedExistingFolders += progress.skippedExistingFolders.size;
+  summary.skippedFiles += progress.skippedExistingFiles;
+  summary.failedFiles += progress.failedFiles;
+}
+
+function countFolders(filePaths: string[]): number {
+  return new Set(filePaths.map(folderKey)).size;
+}
+
+function folderKey(filePath: string): string {
+  const index = filePath.lastIndexOf('/');
+  return index === -1 ? '(root)' : filePath.slice(0, index);
 }
 
 function getRateLimitResetAt(error: unknown): string | undefined {

@@ -29,6 +29,8 @@ type Summary = {
   totalRepos: number; successRepos: number;
   totalFiles: number; uploadedFiles: number;
   skippedFiles: number; failedFiles: number;
+  totalFolders?: number; uploadedFolders?: number;
+  skippedExistingFiles?: number; skippedExistingFolders?: number;
 };
 
 type RunStatus =
@@ -1459,7 +1461,8 @@ export default function Home() {
               </div>
               {(summary.skippedFiles > 0 || summary.totalFiles > 0) && (
                 <p className="text-xs text-zinc-400 text-center">
-                  {summary.totalFiles} total files{summary.skippedFiles > 0 ? ` · ${summary.skippedFiles} skipped` : ''}
+                  {summary.totalFiles} total files{summary.totalFolders ? ` · ${summary.totalFolders} folders` : ''}{summary.skippedFiles > 0 ? ` · ${summary.skippedFiles} skipped` : ''}
+                  {summary.skippedExistingFiles ? ` · ${summary.skippedExistingFiles} already copied` : ''}
                 </p>
               )}
             </div>
