@@ -670,10 +670,35 @@ export default function Home() {
       queueMicrotask(() => {
         setCredentialSaveStatus({ source: 'Saved credentials were unreadable and were cleared.' });
       });
+    }
+
+    try {
+      const storedRepos = localStorage.getItem('detiq-gce-repositories-v1');
+      if (storedRepos) {
+        const parsed = JSON.parse(storedRepos);
+        if (parsed.repositories) setRepositories(parsed.repositories);
+        if (parsed.selectedRepositories) setSelectedRepositories(new Set(parsed.selectedRepositories));
+        if (parsed.branchOverrides) setBranchOverrides(parsed.branchOverrides);
+      }
+    } catch {
+      // ignore
     } finally {
       setFormHydrated(true);
     }
   }, []);
+
+  useEffect(() => {
+    if (!formHydrated) return;
+    try {
+      localStorage.setItem('detiq-gce-repositories-v1', JSON.stringify({
+        repositories,
+        selectedRepositories: Array.from(selectedRepositories),
+        branchOverrides
+      }));
+    } catch {
+      // ignore
+    }
+  }, [repositories, selectedRepositories, branchOverrides, formHydrated]);
 
   useEffect(() => {
     try {
@@ -1074,11 +1099,7 @@ export default function Home() {
                   <button type="submit" className="text-xs text-red-500 hover:text-red-700">Logout</button>
                 </form>
               </div>
-            ) : (
-              <a href="/api/auth/github" className="text-xs bg-zinc-900 dark:bg-white text-white dark:text-zinc-900 px-3 py-1.5 rounded-lg font-medium hover:opacity-90">
-                Login with GitHub
-              </a>
-            )}
+            ) : null}
           </div>
         </div>
       </header>
