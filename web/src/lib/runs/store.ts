@@ -12,6 +12,13 @@ export interface RunStore {
   getEvents(runId: string, afterSequence?: number): Promise<RunEvent[]>;
 }
 
+export class RunStoreConfigurationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'RunStoreConfigurationError';
+  }
+}
+
 class FileRunStore implements RunStore {
   constructor(private readonly rootDir: string) {}
 
@@ -81,10 +88,135 @@ class FileRunStore implements RunStore {
   }
 }
 
+class RedisRunStore implements RunStore {
+  constructor(
+    private readonly url: string,
+    private readonly token: string,
+    private readonly prefix = 'detiq:run'
+  ) {}
+
+  async createRun(run: BackupRunRecord): Promise<BackupRunRecord> {
+    await this.pipeline([
+      ['SET', this.runKey(run.id), JSON.stringify(run)],
+      ['DEL', this.eventsKey(run.id), this.sequenceKey(run.id)],
+    ]);
+    return run;
+  }
+
+  async getRun(runId: string): Promise<StoredRun | null> {
+    const [runResult, eventsResult] = await this.pipeline([
+      ['GET', this.runKey(runId)],
+      ['LRANGE', this.eventsKey(runId), '0', '-1'],
+    ]);
+    if (!runResult.result) return null;
+
+    const events = (eventsResult.result as unknown[]).map((event) => JSON.parse(String(event)) as RunEvent);
+    return {
+      run: JSON.parse(String(runResult.result)) as BackupRunRecord,
+      events,
+    };
+  }
+
+  async updateRun(runId: string, patch: RunUpdate): Promise<BackupRunRecord> {
+    const stored = await this.requireRun(runId);
+    const run = { ...stored.run, ...patch };
+    await this.command(['SET', this.runKey(runId), JSON.stringify(run)]);
+    return run;
+  }
+
+  async appendEvent(
+    runId: string,
+    event: Omit<RunEvent, 'id' | 'runId' | 'sequence' | 'createdAt'>
+  ): Promise<RunEvent> {
+    await this.requireRun(runId);
+    const sequenceResult = await this.command(['INCR', this.sequenceKey(runId)]);
+    const next: RunEvent = {
+      ...event,
+      id: crypto.randomUUID(),
+      runId,
+      sequence: Number(sequenceResult.result),
+      createdAt: new Date().toISOString(),
+    };
+    await this.command(['RPUSH', this.eventsKey(runId), JSON.stringify(next)]);
+    return next;
+  }
+
+  async getEvents(runId: string, afterSequence = 0): Promise<RunEvent[]> {
+    const stored = await this.getRun(runId);
+    return stored?.events.filter((event) => event.sequence > afterSequence) ?? [];
+  }
+
+  private async requireRun(runId: string): Promise<StoredRun> {
+    const stored = await this.getRun(runId);
+    if (!stored) throw new Error(`Run not found: ${runId}`);
+    return stored;
+  }
+
+  private runKey(runId: string): string {
+    return `${this.prefix}:${safeRunId(runId)}`;
+  }
+
+  private eventsKey(runId: string): string {
+    return `${this.runKey(runId)}:events`;
+  }
+
+  private sequenceKey(runId: string): string {
+    return `${this.runKey(runId)}:sequence`;
+  }
+
+  private async command(command: string[]): Promise<RedisResponse> {
+    const response = await fetch(this.url, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${this.token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(command),
+    });
+    return parseRedisResponse(response);
+  }
+
+  private async pipeline(commands: string[][]): Promise<RedisResponse[]> {
+    const response = await fetch(`${this.url.replace(/\/$/, '')}/pipeline`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${this.token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(commands),
+    });
+    const result = await response.json() as unknown;
+    if (!response.ok || !Array.isArray(result)) {
+      throw new Error(`Run store request failed (${response.status}).`);
+    }
+    return result.map((entry) => parseRedisPayload(entry));
+  }
+}
+
 let singleton: RunStore | null = null;
 
 export function getRunStore(): RunStore {
-  singleton ??= new FileRunStore(process.env.RUN_STATE_DIR ?? path.join(process.cwd(), '.detiq-runs'));
+  if (singleton) return singleton;
+
+  const redisUrl = process.env.UPSTASH_REDIS_REST_URL;
+  const redisToken = process.env.UPSTASH_REDIS_REST_TOKEN;
+  if (redisUrl || redisToken) {
+    if (!redisUrl || !redisToken) {
+      throw new RunStoreConfigurationError(
+        'Both UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN are required.'
+      );
+    }
+    singleton = new RedisRunStore(redisUrl, redisToken, process.env.RUN_STORE_KEY_PREFIX);
+    return singleton;
+  }
+
+  if (process.env.VERCEL === '1') {
+    throw new RunStoreConfigurationError(
+      'Durable run storage is not configured. Set UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN in Vercel.'
+    );
+  }
+
+  singleton = new FileRunStore(process.env.RUN_STATE_DIR ?? path.join(process.cwd(), '.detiq-runs'));
   return singleton;
 }
 
@@ -132,4 +264,19 @@ export async function emitRunEvent(
 function safeRunId(runId: string): string {
   if (!/^[a-zA-Z0-9-]+$/.test(runId)) throw new Error('Invalid run id');
   return runId;
+}
+
+type RedisResponse = { result: unknown };
+
+async function parseRedisResponse(response: Response): Promise<RedisResponse> {
+  const payload = await response.json() as unknown;
+  if (!response.ok) throw new Error(`Run store request failed (${response.status}).`);
+  return parseRedisPayload(payload);
+}
+
+function parseRedisPayload(payload: unknown): RedisResponse {
+  if (!payload || typeof payload !== 'object' || !('result' in payload)) {
+    throw new Error('Run store returned an invalid response.');
+  }
+  return payload as RedisResponse;
 }
