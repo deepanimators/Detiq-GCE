@@ -31,13 +31,14 @@ export async function queueRun(runId: string, payload: RunCreatePayload, reposit
 }
 
 export async function processNextQueuedRun(): Promise<boolean> {
-  const job = await claimRun();
-  if (!job) return false;
+  const claimed = await claimRun();
+  if (!claimed) return false;
+  const { job, token } = claimed;
 
   const controller = new AbortController();
   try {
     await executeRun(job.runId, job.payload, job.repositories, controller);
-    await acknowledgeRun(job);
+    await acknowledgeRun(token);
   } catch (error) {
     await getRunStore().updateRun(job.runId, {
       status: 'failed',

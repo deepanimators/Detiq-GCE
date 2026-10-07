@@ -91,14 +91,14 @@ export async function enqueueRun(job: QueuedRun): Promise<void> {
   await redisCommand(['LPUSH', key, encrypt(job)]);
 }
 
-export async function claimRun(): Promise<QueuedRun | null> {
+export async function claimRun(): Promise<{ job: QueuedRun; token: string } | null> {
   const { prefix, key } = redisConfig();
   const processingKey = `${prefix}:${PROCESSING_QUEUE_NAME}`;
   const value = await redisCommand(['RPOPLPUSH', key, processingKey]);
-  return typeof value === 'string' ? decrypt(value) : null;
+  return typeof value === 'string' ? { job: decrypt(value), token: value } : null;
 }
 
-export async function acknowledgeRun(job: QueuedRun): Promise<void> {
+export async function acknowledgeRun(token: string): Promise<void> {
   const { prefix } = redisConfig();
-  await redisCommand(['LREM', `${prefix}:${PROCESSING_QUEUE_NAME}`, '1', encrypt(job)]);
+  await redisCommand(['LREM', `${prefix}:${PROCESSING_QUEUE_NAME}`, '1', token]);
 }
