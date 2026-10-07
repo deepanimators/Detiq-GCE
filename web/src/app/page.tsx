@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useRef } from 'react';
+import { useCallback, useEffect, useState, useRef } from 'react';
 import { ClipboardCopy, Download, Eye, EyeOff, Save, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 
@@ -59,6 +59,7 @@ type RunEventEnvelope = {
   run?: RunRecord;
   error?: string;
 };
+type RunEventRecord = NonNullable<RunEventEnvelope['event']>;
 
 const METADATA_TYPES = [
   { id: 'issues', label: 'Issues' },
@@ -81,10 +82,35 @@ const CREDENTIAL_STORAGE_KEYS = {
   githubTarget: 'detiq-gce-github-target-v1',
   azure: 'detiq-gce-azure-v1',
 } as const;
+const RUN_CACHE_STORAGE_KEY = 'detiq-gce-run-cache-v1';
+const MAX_CACHED_RUNS = 10;
+const MAX_CACHED_LOG_LINES = 2000;
+const TERMINAL_RUN_STATUSES = new Set<RunStatus>([
+  'preflight_failed',
+  'completed',
+  'partial',
+  'failed',
+  'cancelled',
+]);
 
 type CredentialSection = keyof typeof CREDENTIAL_STORAGE_KEYS;
 type PersistedSectionState = Record<string, unknown>;
 type CredentialStatusMap = Partial<Record<CredentialSection, string>>;
+type CachedRunSession = {
+  run: RunRecord;
+  logs: string[];
+  summary: Summary | null;
+  lastEventSequence?: number;
+  updatedAt: string;
+};
+type RunCacheState = {
+  activeRunId?: string;
+  runs: Record<string, CachedRunSession>;
+};
+
+function isTerminalRunStatus(status: RunStatus) {
+  return TERMINAL_RUN_STATUSES.has(status);
+}
 
 // ── Shared UI components ──────────────────────────────────────────────────────
 
@@ -313,6 +339,30 @@ function readStoredSection(storageKey: string): PersistedSectionState | null {
   return parsed && typeof parsed === 'object' ? parsed as PersistedSectionState : null;
 }
 
+function readRunCache(): RunCacheState {
+  const saved = localStorage.getItem(RUN_CACHE_STORAGE_KEY);
+  if (!saved) return { runs: {} };
+  const parsed = JSON.parse(saved) as Partial<RunCacheState>;
+  return parsed && typeof parsed === 'object' && parsed.runs && typeof parsed.runs === 'object'
+    ? { activeRunId: parsed.activeRunId, runs: parsed.runs as Record<string, CachedRunSession> }
+    : { runs: {} };
+}
+
+function writeRunCache(cache: RunCacheState): void {
+  const entries = Object.entries(cache.runs)
+    .sort(([, a], [, b]) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))
+    .slice(0, MAX_CACHED_RUNS);
+  localStorage.setItem(RUN_CACHE_STORAGE_KEY, JSON.stringify({
+    activeRunId: cache.activeRunId,
+    runs: Object.fromEntries(entries),
+  } satisfies RunCacheState));
+}
+
+function latestCachedRun(cache: RunCacheState): CachedRunSession | null {
+  return Object.values(cache.runs)
+    .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))[0] ?? null;
+}
+
 // ── Main ─────────────────────────────────────────────────────────────────────
 
 export default function Home() {
@@ -388,11 +438,86 @@ export default function Home() {
   const [running, setRunning] = useState(false);
   const [summary, setSummary] = useState<Summary | null>(null);
   const [currentRun, setCurrentRun] = useState<RunRecord | null>(null);
+  const [lastRunEventSequence, setLastRunEventSequence] = useState(0);
   const [formHydrated, setFormHydrated] = useState(false);
+  const [runCacheHydrated, setRunCacheHydrated] = useState(false);
   const [storageAvailable, setStorageAvailable] = useState(true);
   const [credentialSaveStatus, setCredentialSaveStatus] = useState<CredentialStatusMap>({});
   const [logActionStatus, setLogActionStatus] = useState('');
+  const [runCacheStatus, setRunCacheStatus] = useState('');
   const logsEndRef = useRef<HTMLDivElement>(null);
+
+  const addLog = useCallback((msg: string) => {
+    setLogs((prev) => {
+      setTimeout(() => logsEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 0);
+      return [...prev, msg];
+    });
+  }, []);
+
+  const watchRun = useCallback(async (runId: string, initialEventSequence = 0) => {
+    return new Promise<void>((resolve) => {
+      const events = new EventSource(`/api/runs/${runId}/events`);
+      let settled = false;
+      let pollTimer: ReturnType<typeof setInterval> | undefined;
+      let lastEventSequence = initialEventSequence;
+
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        if (pollTimer) clearInterval(pollTimer);
+        events.close();
+        resolve();
+      };
+
+      const applyRun = (run: RunRecord) => {
+        setCurrentRun(run);
+        if (isTerminalRunStatus(run.status)) {
+          setRunning(false);
+          finish();
+        }
+      };
+
+      const applyEvent = (event: RunEventRecord) => {
+        if (event.sequence <= lastEventSequence) return;
+        lastEventSequence = event.sequence;
+        setLastRunEventSequence(event.sequence);
+        if (event.message) {
+          const prefix = event.type === 'run.log' ? '' : `[${event.type}] `;
+          addLog(`${prefix}${event.message}`);
+        }
+      };
+
+      const pollRun = async () => {
+        try {
+          const response = await fetch(`/api/runs/${runId}`, { cache: 'no-store' });
+          const body = await response.json() as { run?: RunRecord; events?: RunEventRecord[] };
+          if (body.run) applyRun(body.run);
+          body.events?.forEach(applyEvent);
+        } catch {
+          // The next interval retries while the durable run remains active.
+        }
+      };
+
+      events.onmessage = (message) => {
+        try {
+          const data = JSON.parse(message.data) as RunEventEnvelope;
+          if (data.error) addLog(`ERROR: ${data.error}`);
+          if (data.run) applyRun(data.run);
+          if (data.event) applyEvent(data.event);
+        } catch (e) {
+          addLog(`[parse error] ${e}`);
+        }
+      };
+
+      events.onerror = () => {
+        if (settled) return;
+        addLog('Live events disconnected; continuing with durable run polling.');
+        events.close();
+        void pollRun();
+        pollTimer = setInterval(() => void pollRun(), 3000);
+      };
+    });
+  }, [addLog]);
 
   function applyPersistedSection(section: CredentialSection, state: PersistedSectionState) {
     const setString = (key: string, setter: (value: string) => void) => {
@@ -508,12 +633,61 @@ export default function Home() {
     }
   }, []);
 
-  function addLog(msg: string) {
-    setLogs((prev) => {
-      setTimeout(() => logsEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 0);
-      return [...prev, msg];
-    });
-  }
+  useEffect(() => {
+    try {
+      if (!canUseLocalStorage()) {
+        queueMicrotask(() => {
+          setRunCacheStatus('Browser run cache is unavailable in this mode.');
+          setRunCacheHydrated(true);
+        });
+        return;
+      }
+
+      const cache = readRunCache();
+      const active = cache.activeRunId ? cache.runs[cache.activeRunId] : latestCachedRun(cache);
+      queueMicrotask(() => {
+        if (active) {
+          setCurrentRun(active.run);
+          setLogs(active.logs);
+          setSummary(active.summary);
+          setLastRunEventSequence(active.lastEventSequence ?? 0);
+          setRunCacheStatus(`Restored run ${active.run.id.slice(0, 8)} from this browser.`);
+
+          if (!isTerminalRunStatus(active.run.status)) {
+            setRunning(true);
+            void watchRun(active.run.id, active.lastEventSequence ?? 0);
+          }
+        }
+        setRunCacheHydrated(true);
+      });
+    } catch {
+      queueMicrotask(() => {
+        setRunCacheStatus('Saved run cache was unreadable and was ignored.');
+        setRunCacheHydrated(true);
+      });
+    }
+  }, [watchRun]);
+
+  useEffect(() => {
+    if (!runCacheHydrated || !currentRun || !storageAvailable) return;
+
+    try {
+      const cache = readRunCache();
+      cache.activeRunId = currentRun.id;
+      cache.runs[currentRun.id] = {
+        run: currentRun,
+        logs: logs.slice(-MAX_CACHED_LOG_LINES),
+        summary,
+        lastEventSequence: lastRunEventSequence,
+        updatedAt: new Date().toISOString(),
+      };
+      writeRunCache(cache);
+    } catch {
+      queueMicrotask(() => {
+        setRunCacheStatus('Unable to save run state in this browser.');
+      });
+    }
+  }, [currentRun, lastRunEventSequence, logs, runCacheHydrated, storageAvailable, summary]);
 
   function countAdapters() {
     return [r2On, s3On, gdriveOn, ghOn, azureOn].filter(Boolean).length;
@@ -656,12 +830,28 @@ export default function Home() {
     }
   }
 
+  function clearDisplayedRun() {
+    setLogs([]);
+    setSummary(null);
+    setCurrentRun(null);
+    setLastRunEventSequence(0);
+    setRunCacheStatus('');
+    try {
+      const cache = readRunCache();
+      delete cache.activeRunId;
+      writeRunCache(cache);
+    } catch {
+      // Clearing the visible run should still work when browser storage is unavailable.
+    }
+  }
+
   async function startExtraction() {
     if (!pat || !targetName) return;
     setRunning(true);
     setLogs([]);
     setSummary(null);
     setCurrentRun(null);
+    setLastRunEventSequence(0);
 
     try {
       const res = await fetch('/api/runs', {
@@ -728,62 +918,6 @@ export default function Home() {
     }
   }
 
-  async function watchRun(runId: string) {
-    return new Promise<void>((resolve) => {
-      const events = new EventSource(`/api/runs/${runId}/events`);
-      let settled = false;
-      let pollTimer: ReturnType<typeof setInterval> | undefined;
-
-      const finish = () => {
-        if (settled) return;
-        settled = true;
-        if (pollTimer) clearInterval(pollTimer);
-        events.close();
-        resolve();
-      };
-
-      const applyRun = (run: RunRecord) => {
-        setCurrentRun(run);
-        if (isTerminalStatus(run.status)) {
-          setRunning(false);
-          finish();
-        }
-      };
-
-      const pollRun = async () => {
-        try {
-          const response = await fetch(`/api/runs/${runId}`, { cache: 'no-store' });
-          const body = await response.json() as { run?: RunRecord };
-          if (body.run) applyRun(body.run);
-        } catch {
-          // The next interval retries while the durable run remains active.
-        }
-      };
-
-      events.onmessage = (message) => {
-        try {
-          const data = JSON.parse(message.data) as RunEventEnvelope;
-          if (data.error) addLog(`ERROR: ${data.error}`);
-          if (data.run) applyRun(data.run);
-          if (data.event?.message) {
-            const prefix = data.event.type === 'run.log' ? '' : `[${data.event.type}] `;
-            addLog(`${prefix}${data.event.message}`);
-          }
-        } catch (e) {
-          addLog(`[parse error] ${e}`);
-        }
-      };
-
-      events.onerror = () => {
-        if (settled) return;
-        addLog('Live events disconnected; continuing with durable run polling.');
-        events.close();
-        void pollRun();
-        pollTimer = setInterval(() => void pollRun(), 3000);
-      };
-    });
-  }
-
   async function cancelRun() {
     if (!currentRun || !running) return;
     try {
@@ -796,10 +930,6 @@ export default function Home() {
     } finally {
       setRunning(false);
     }
-  }
-
-  function isTerminalStatus(status: RunStatus) {
-    return ['preflight_failed', 'completed', 'partial', 'failed', 'cancelled'].includes(status);
   }
 
   async function copyLogs() {
@@ -1126,7 +1256,7 @@ export default function Home() {
         </div>
 
         {/* ── Right: live log ────────────────────────────────────────────── */}
-        <div className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-800 flex flex-col min-h-[24rem] xl:sticky xl:top-24 xl:h-[calc(100dvh-7rem)] xl:max-h-[calc(100dvh-7rem)] xl:min-h-0 xl:z-0 overflow-hidden">
+        <div className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-800 flex flex-col min-h-[24rem] xl:sticky xl:top-20 xl:h-[calc(100svh-6rem)] xl:max-h-[calc(100svh-6rem)] xl:min-h-0 xl:z-0 overflow-hidden">
           <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-3 border-b border-zinc-100 dark:border-zinc-800 flex-shrink-0">
             <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-50">Live Log</h2>
             <div className="flex flex-wrap items-center justify-end gap-2">
@@ -1155,13 +1285,13 @@ export default function Home() {
                 </>
               )}
               {!running && logs.length > 0 && (
-                <button onClick={() => { setLogs([]); setSummary(null); setCurrentRun(null); }}
+                <button onClick={clearDisplayedRun}
                   className="text-xs text-zinc-400 hover:text-zinc-600">Clear</button>
               )}
             </div>
           </div>
 
-          {(queuedNeedsWorker || actualError || logActionStatus) && (
+          {(queuedNeedsWorker || actualError || logActionStatus || runCacheStatus) && (
             <div className="border-b border-zinc-100 dark:border-zinc-800 px-4 py-3 flex-shrink-0 space-y-1 bg-zinc-50 dark:bg-zinc-900">
               {queuedNeedsWorker && (
                 <p className="text-xs text-amber-600 dark:text-amber-400 break-words">
@@ -1176,10 +1306,13 @@ export default function Home() {
               {logActionStatus && (
                 <p className="text-xs text-zinc-500 dark:text-zinc-400">{logActionStatus}</p>
               )}
+              {runCacheStatus && (
+                <p className="text-xs text-zinc-500 dark:text-zinc-400">{runCacheStatus}</p>
+              )}
             </div>
           )}
 
-          <div className="flex-1 overflow-y-auto p-4 font-mono text-xs text-zinc-600 dark:text-zinc-400 space-y-0.5 min-h-0">
+          <div className="flex-1 overflow-y-auto p-4 pb-6 font-mono text-xs text-zinc-600 dark:text-zinc-400 space-y-0.5 min-h-0">
             {logs.length === 0 && !running && (
               <p className="text-zinc-400 text-center mt-20 font-sans text-sm">
                 Configure source + storage targets, then click Start.
@@ -1202,14 +1335,14 @@ export default function Home() {
           </div>
 
           {summary && (
-            <div className="border-t border-zinc-100 dark:border-zinc-800 p-4 flex-shrink-0">
-              <div className="grid grid-cols-3 gap-3 mb-2">
+            <div className="border-t border-zinc-100 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-3 flex-shrink-0">
+              <div className="grid grid-cols-3 gap-2 mb-2">
                 {[
                   { label: 'Repos', value: `${summary.successRepos}/${summary.totalRepos}`, ok: summary.successRepos === summary.totalRepos },
                   { label: 'Uploaded', value: summary.uploadedFiles, ok: true },
                   { label: 'Failed', value: summary.failedFiles, ok: summary.failedFiles === 0 },
                 ].map((s) => (
-                  <div key={s.label} className="text-center bg-zinc-50 dark:bg-zinc-800 rounded-lg py-2">
+                  <div key={s.label} className="text-center bg-zinc-50 dark:bg-zinc-800 rounded-lg py-2 min-w-0">
                     <div className={`text-xl font-semibold ${s.ok ? 'text-zinc-900 dark:text-zinc-50' : 'text-red-500'}`}>{s.value}</div>
                     <div className="text-xs text-zinc-500">{s.label}</div>
                   </div>
@@ -1224,8 +1357,8 @@ export default function Home() {
           )}
 
           {currentRun && !summary && (
-            <div className="border-t border-zinc-100 dark:border-zinc-800 p-4 flex-shrink-0">
-              <div className="grid grid-cols-3 gap-3 mb-2">
+            <div className="border-t border-zinc-100 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-3 flex-shrink-0">
+              <div className="grid grid-cols-3 gap-2 mb-2">
                 {[
                   { label: 'Status', value: currentRun.status, ok: !['failed', 'partial', 'preflight_failed'].includes(currentRun.status) },
                   { label: 'Repos', value: `${currentRun.completedRepos}/${currentRun.discoveredRepos || currentRun.estimatedRepos}`, ok: currentRun.failedRepos === 0 },
