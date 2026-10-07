@@ -1,24 +1,23 @@
 import { formatGitHubError, getGitHubErrorDetails, GitHubClient, type ListRepoOptions } from '@/lib/github';
-import { getSession } from '@/lib/auth/session';
+import { resolveGitHubToken } from '@/lib/auth/token';
 
 export const runtime = 'nodejs';
 
 export async function POST(req: Request) {
   try {
     const body = await req.json() as Record<string, unknown>;
-    let pat = typeof body.pat === 'string' ? body.pat.trim() : '';
+    const bodyPat = typeof body.pat === 'string' ? body.pat.trim() : '';
     const targetName = typeof body.targetName === 'string' ? body.targetName.trim() : '';
     const targetType = body.targetType === 'user' || body.targetType === 'org' ? body.targetType : null;
 
-    if (!pat) {
-      const session = await getSession();
-      if (session?.githubToken) {
-        pat = session.githubToken;
-      }
+    if (!targetName || !targetType) {
+      return Response.json({ error: 'targetType and targetName are required' }, { status: 400 });
     }
 
-    if (!pat || !targetName || !targetType) {
-      return Response.json({ error: 'pat (or authenticated session), targetType, and targetName are required' }, { status: 400 });
+    const pat = await resolveGitHubToken(bodyPat, targetName, targetType);
+
+    if (!pat) {
+      return Response.json({ error: 'pat (or authenticated session / GitHub App), targetType, and targetName are required' }, { status: 400 });
     }
 
     const options: ListRepoOptions = {
