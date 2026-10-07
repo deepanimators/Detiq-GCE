@@ -30,6 +30,7 @@ export type QueuedRun = {
   payload: RunCreatePayload;
   repositories: import('@/lib/github').Repo[];
   enqueuedAt: string;
+  totalRepositories?: number;
 };
 
 export type ExtractOptions = {

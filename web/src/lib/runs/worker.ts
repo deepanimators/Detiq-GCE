@@ -18,6 +18,11 @@ type ActiveRun = {
   repositories: Repo[];
 };
 
+type WorkerExecutionResult = {
+  completed: boolean;
+  remainingRepositories: Repo[];
+};
+
 const TERMINAL_STATUSES = new Set(['preflight_failed', 'completed', 'partial', 'failed', 'cancelled']);
 const activeRuns = new Map<string, ActiveRun>();
 
@@ -33,7 +38,13 @@ export async function queueRun(runId: string, payload: RunCreatePayload, reposit
     );
   }
 
-  await enqueueRun({ runId, payload, repositories, enqueuedAt: new Date().toISOString() });
+  await enqueueRun({
+    runId,
+    payload,
+    repositories,
+    totalRepositories: repositories.length,
+    enqueuedAt: new Date().toISOString(),
+  });
 
   const directLimit = Number(process.env.DIRECT_RUN_REPO_LIMIT ?? 0);
   if (!isVercelRuntime() && directLimit > 0 && repositories.length <= directLimit) {
@@ -45,7 +56,8 @@ export async function processQueuedRuns(options: {
   maxJobs?: number;
   maxRuntimeMs?: number;
 } = {}): Promise<WorkerBatchResult> {
-  const maxJobs = positiveInteger(options.maxJobs ?? Number(process.env.WORKER_BATCH_SIZE ?? 5), 5);
+  const defaultMaxJobs = isVercelRuntime() ? 1 : 5;
+  const maxJobs = positiveInteger(options.maxJobs ?? Number(process.env.WORKER_BATCH_SIZE ?? defaultMaxJobs), defaultMaxJobs);
   const maxRuntimeMs = positiveInteger(options.maxRuntimeMs ?? Number(process.env.WORKER_BATCH_RUNTIME_MS ?? 270_000), 270_000);
   const deadline = Date.now() + maxRuntimeMs;
   let processed = 0;
@@ -73,8 +85,23 @@ export async function processNextQueuedRun(): Promise<boolean> {
 
   activeRuns.set(job.runId, { controller, payload: job.payload, repositories: job.repositories });
   try {
-    await executeRun(job.runId, job.payload, job.repositories, controller);
+    const result = await executeRun(
+      job.runId,
+      job.payload,
+      job.repositories,
+      job.totalRepositories ?? job.repositories.length,
+      controller
+    );
     await acknowledgeRun(token);
+    if (!result.completed) {
+      await enqueueRun({
+        runId: job.runId,
+        payload: job.payload,
+        repositories: result.remainingRepositories,
+        totalRepositories: job.totalRepositories ?? job.repositories.length,
+        enqueuedAt: new Date().toISOString(),
+      });
+    }
   } catch (error) {
     const message = redactSecrets(error instanceof Error ? error.message : String(error));
     await getRunStore().updateRun(job.runId, {
@@ -102,19 +129,33 @@ async function executeRun(
   runId: string,
   payload: RunCreatePayload,
   repositories: Repo[],
+  totalRepositories: number,
   controller: AbortController
-): Promise<void> {
+): Promise<WorkerExecutionResult> {
   const store = getRunStore();
   const startedAt = Date.now();
   let logChain = Promise.resolve();
   let timeout: ReturnType<typeof setTimeout> | undefined;
+  let timedOut = false;
+  const repoChunkSize = Math.min(repositories.length, workerRepoChunkSize());
+  const chunk = repositories.slice(0, repoChunkSize);
+  const remainingRepositories = repositories.slice(repoChunkSize);
+  const existing = await store.getRun(runId);
+  const completedBefore = existing?.run.completedRepos ?? 0;
+  const failedBefore = existing?.run.failedRepos ?? 0;
 
   await store.updateRun(runId, {
     status: 'running',
-    startedAt: new Date(startedAt).toISOString(),
-    discoveredRepos: repositories.length,
+    startedAt: existing?.run.startedAt ?? new Date(startedAt).toISOString(),
+    discoveredRepos: totalRepositories,
   });
-  await emitRunEvent(runId, 'run.started', `Run ${runId} started with ${repositories.length} repositories.`);
+  await emitRunEvent(
+    runId,
+    'run.started',
+    remainingRepositories.length
+      ? `Run ${runId} processing ${chunk.length}/${repositories.length} queued repositories.`
+      : `Run ${runId} processing final ${chunk.length} queued repositories.`
+  );
 
   try {
     const adapters = buildAdaptersFromConfig(payload.adapters);
@@ -131,12 +172,12 @@ async function executeRun(
       targetType: payload.targetType,
       targetName: payload.targetName,
       adapters,
-      repositories,
+      repositories: chunk,
       ...payload.options,
       onLog: emitLog,
       onRepoComplete: (summary) => {
         void store.updateRun(runId, {
-          completedRepos: summary.successRepos,
+          completedRepos: completedBefore + summary.successRepos,
         });
       },
       signal: controller.signal,
@@ -145,29 +186,46 @@ async function executeRun(
 
     await logChain;
 
-    const terminalStatus = summary.failedFiles > 0 ? 'partial' : 'completed';
+    const completedRepos = completedBefore + summary.successRepos;
+    const failedRepos = failedBefore + Math.max(0, summary.totalRepos - summary.successRepos);
+    if (remainingRepositories.length) {
+      await store.updateRun(runId, {
+        status: 'queued',
+        completedRepos,
+        failedRepos,
+      });
+      await emitRunEvent(
+        runId,
+        'run.queued',
+        `Worker slice completed: ${completedRepos}/${totalRepositories} repositories done. ${remainingRepositories.length} repository job(s) requeued.`
+      );
+      return { completed: false, remainingRepositories };
+    }
+
+    const terminalStatus = summary.failedFiles > 0 || failedRepos > 0 ? 'partial' : 'completed';
     await store.updateRun(runId, {
       status: terminalStatus,
       completedAt: new Date().toISOString(),
-      completedRepos: summary.successRepos,
-      failedRepos: Math.max(0, summary.totalRepos - summary.successRepos),
-      partialRepos: summary.failedFiles > 0 ? summary.totalRepos : 0,
+      completedRepos,
+      failedRepos,
+      partialRepos: terminalStatus === 'partial' ? failedRepos : 0,
     });
 
     await emitRunEvent(
       runId,
       terminalStatus === 'completed' ? 'run.completed' : 'run.partial',
-      `Run ${terminalStatus}: ${summary.successRepos}/${summary.totalRepos} repositories, ${summary.failedFiles} failed files.`,
+      `Run ${terminalStatus}: ${completedRepos}/${totalRepositories} repositories, ${summary.failedFiles} failed files in final slice.`,
       { durationMs: Date.now() - startedAt }
     );
+    return { completed: true, remainingRepositories: [] };
   } catch (error) {
     const message = redactSecrets(error instanceof Error ? error.message : String(error));
-    const status = controller.signal.aborted ? 'cancelled' : 'failed';
+    const status = controller.signal.aborted && !timedOut ? 'cancelled' : 'failed';
 
     await store.updateRun(runId, {
       status,
       completedAt: new Date().toISOString(),
-      errorCode: status === 'cancelled' ? 'RunCancelled' : 'RunFailed',
+      errorCode: timedOut ? 'WorkerTimeout' : status === 'cancelled' ? 'RunCancelled' : 'RunFailed',
       errorMessage: message,
     });
 
@@ -176,8 +234,9 @@ async function executeRun(
       runId,
       status === 'cancelled' ? 'run.cancelled' : 'run.failed',
       status === 'cancelled' ? 'Run cancelled by operator.' : message,
-      { durationMs: Date.now() - startedAt, errorCode: status === 'cancelled' ? 'RunCancelled' : 'RunFailed' }
+      { durationMs: Date.now() - startedAt, errorCode: timedOut ? 'WorkerTimeout' : status === 'cancelled' ? 'RunCancelled' : 'RunFailed' }
     );
+    return { completed: true, remainingRepositories: [] };
   } finally {
     if (timeout) clearTimeout(timeout);
   }
@@ -188,6 +247,7 @@ async function executeRun(
       promise,
       new Promise<T>((_resolve, reject) => {
         timeout = setTimeout(() => {
+          timedOut = true;
           activeController.abort();
           reject(new Error(`Worker exceeded ${Math.round(timeoutMs / 1000)}s runtime budget before completing the run.`));
         }, timeoutMs);
@@ -207,4 +267,9 @@ function positiveInteger(value: number, fallback: number): number {
 function runTimeoutMs(): number {
   const fallback = isVercelRuntime() ? 240_000 : 0;
   return positiveInteger(Number(process.env.WORKER_RUN_TIMEOUT_MS ?? fallback), fallback);
+}
+
+function workerRepoChunkSize(): number {
+  const fallback = isVercelRuntime() ? 1 : Number.MAX_SAFE_INTEGER;
+  return positiveInteger(Number(process.env.WORKER_REPO_CHUNK_SIZE ?? fallback), fallback);
 }

@@ -51,10 +51,12 @@ non-Vercel local development.
 Vercel Functions are not a multi-hour worker runtime. The platform worker is bounded
 by `WORKER_RUN_TIMEOUT_MS` (default 240 seconds on Vercel), and polling marks a
 `running` run as failed when it stops emitting progress for `RUN_STALE_SECONDS`
-(default 420 seconds on Vercel). Use this deployment shape for small runs and
-operator validation. Large organizations or full production backups should run
-`/api/worker` from an external worker runtime, or evolve the queue into smaller
-repository/file-level jobs.
+(default 420 seconds on Vercel). On Vercel, the worker defaults to
+`WORKER_REPO_CHUNK_SIZE=1`: one invocation processes a bounded repository slice,
+then requeues the remaining repositories for the next platform trigger. This keeps
+small runs moving inside serverless limits, but large organizations or full
+production backups should still run `/api/worker` from an external worker runtime
+or evolve the queue into smaller file-level jobs.
 
 Credentials are intentionally not persisted in run state. The in-process worker keeps
 submitted credentials only in memory long enough to execute the run. Production should
