@@ -37,7 +37,9 @@ required. Configure the matching `R2_*` or `S3_*` variables and
 external scheduler or worker runtime with `CRON_SECRET` (for example, cronjobs.org
 or a private worker). It claims one encrypted queue object per invocation, so the
 browser request returns immediately and long-running extraction is not tied to the
-`/api/runs` request lifecycle.
+`/api/runs` request lifecycle. Small runs (up to `DIRECT_RUN_REPO_LIMIT`, default
+10 repositories) are processed inline so they do not wait for an unavailable
+worker; larger runs remain queued until `/api/worker` is invoked.
 
 Credentials are intentionally not persisted in run state. The in-process worker keeps
 submitted credentials only in memory long enough to execute the run. Production should
