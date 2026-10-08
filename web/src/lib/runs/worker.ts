@@ -180,11 +180,14 @@ async function executeRun(
   };
 
   let heartbeatInterval: ReturnType<typeof setInterval> | undefined;
+  let activeRenewLease: Promise<void> | null = null;
 
   try {
     heartbeatInterval = setInterval(() => {
-      renewLease(token).catch(e => {
+      activeRenewLease = renewLease(token).catch(e => {
         emitLog(`[warning] Failed to renew lease: ${e.message}`);
+      }).finally(() => {
+        activeRenewLease = null;
       });
       emitLog(`[heartbeat] Worker is still processing slice...`);
     }, 30000);
@@ -218,6 +221,7 @@ async function executeRun(
     if (heartbeatInterval) {
       clearInterval(heartbeatInterval);
       heartbeatInterval = undefined;
+      if (activeRenewLease) await activeRenewLease;
     }
     await logChain;
 
@@ -238,6 +242,7 @@ async function executeRun(
         `GitHub API rate limit exhausted. Worker paused this run until ${retryAfterRateLimit}.`,
         { errorCode: 'GitHubRateLimited' }
       );
+      await logChain;
       return { completed: false, remainingRepositories: retryRepositories, availableAt: retryAfterRateLimit };
     }
 
@@ -254,6 +259,7 @@ async function executeRun(
         'run.queued',
         `Worker slice completed: ${completedRepos}/${totalRepositories} repositories done. ${remainingRepositories.length} repository job(s) requeued.`
       );
+      await logChain;
       return { completed: false, remainingRepositories };
     }
 
@@ -276,6 +282,7 @@ async function executeRun(
     if (updatedRun) {
       await writeRunManifest(runId, updatedRun.run, adapters, emitLog);
     }
+    await logChain;
     return { completed: true, remainingRepositories: [] };
   } catch (error) {
     const message = redactSecrets(error instanceof Error ? error.message : String(error));
@@ -299,10 +306,12 @@ async function executeRun(
     if (updatedRun) {
       await writeRunManifest(runId, updatedRun.run, adapters, emitLog);
     }
+    await logChain;
     return { completed: true, remainingRepositories: [] };
   } finally {
     if (timeout) clearTimeout(timeout);
     if (heartbeatInterval) clearInterval(heartbeatInterval);
+    if (activeRenewLease) await activeRenewLease;
   }
 
   async function withRunTimeout<T>(promise: Promise<T>, activeController: AbortController, timeoutMs: number): Promise<T> {
