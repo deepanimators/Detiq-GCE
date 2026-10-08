@@ -106,7 +106,7 @@ export class S3Adapter implements DurableStorageAdapter {
     }
   }
 
-  async preflight(): Promise<StoragePreflightResult> {
+  async preflight(options?: { requireOverwrite?: boolean }): Promise<StoragePreflightResult> {
     const key = `.detiq/preflight-${Date.now()}-${Math.random().toString(16).slice(2)}.txt`;
     let versioning: boolean | undefined;
 
@@ -125,13 +125,30 @@ export class S3Adapter implements DurableStorageAdapter {
         Body: Buffer.from('detiq-preflight'),
         ContentType: 'text/plain',
       }));
+      
+      if (options?.requireOverwrite) {
+        try {
+          await this.client.send(new PutObjectCommand({
+            Bucket: this.bucket,
+            Key: key,
+            Body: Buffer.from('detiq-preflight-overwrite'),
+            ContentType: 'text/plain',
+          }));
+        } catch (err: any) {
+          if (err.message?.includes('locked') || err.message?.includes('policy') || err.name === 'MethodNotAllowed' || err.$metadata?.httpStatusCode === 403 || err.$metadata?.httpStatusCode === 405) {
+            throw new Error('Bucket Object Lock (WORM) prevents overwriting files. Run state cannot be stored here.');
+          }
+          throw err;
+        }
+      }
+      
       await this.delete(key);
 
       return {
         adapter: this.name,
         writable: true,
         versioning,
-        message: versioning === false ? 'Bucket is writable, but versioning is not enabled.' : 'Bucket is writable.',
+        message: versioning === false ? 'Bucket is writable, but versioning is not enabled.' : 'Bucket is writable and allows overwriting (no Object Lock).',
       };
     } catch (error) {
       return preflightFailure(this.name, error);

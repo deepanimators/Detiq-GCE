@@ -61,7 +61,7 @@ export type StorageHeadResult = {
 };
 
 export interface DurableStorageAdapter extends StorageAdapter {
-  preflight(): Promise<StoragePreflightResult>;
+  preflight(options?: { requireOverwrite?: boolean }): Promise<StoragePreflightResult>;
   head(storagePath: string): Promise<StorageHeadResult>;
   download?(storagePath: string): Promise<{ content: Buffer, etag?: string }>;
   uploadOptimistic?(storagePath: string, content: Buffer, contentType: string, ifMatchEtag?: string): Promise<{ etag: string }>;

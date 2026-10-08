@@ -7,7 +7,7 @@ import {
   getRunStore,
   RunStoreConfigurationError,
 } from '@/lib/runs/store';
-import { RunObjectStoreConfigurationError } from '@/lib/runs/object-store';
+import { RunObjectStoreConfigurationError, checkRunObjectStore } from '@/lib/runs/object-store';
 import { RunQueueConfigurationError } from '@/lib/runs/queue';
 import { processQueuedRuns, queueRun } from '@/lib/runs/worker';
 import { formatGitHubError, getGitHubErrorDetails } from '@/lib/github';
@@ -43,13 +43,28 @@ export async function POST(req: Request) {
     const preflight = await runPreflight(payload);
     const { repositories, ...preflightResponse } = preflight;
 
+    // Platform store must also be writable for the run to succeed.
+    if (process.env.VERCEL === '1' && preflight.ok) {
+      try {
+        await checkRunObjectStore();
+      } catch (error: any) {
+        preflight.ok = false;
+        const msg = error instanceof Error ? error.message : String(error);
+        preflightResponse.adapters.push({
+          adapter: 'platform_store',
+          writable: false,
+          message: msg,
+        });
+      }
+    }
+
     await store.updateRun(run.id, {
       estimatedRepos: repositories.length,
       discoveredRepos: repositories.length,
     });
 
     if (!preflight.ok) {
-      const firstFailure = preflight.adapters.find((result) => !result.writable);
+      const firstFailure = preflightResponse.adapters.find((result) => !result.writable);
       await store.updateRun(run.id, {
         status: 'preflight_failed',
         completedAt: new Date().toISOString(),

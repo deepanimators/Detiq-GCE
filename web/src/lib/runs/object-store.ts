@@ -91,6 +91,6 @@ export async function deleteRunObject(key: string): Promise<void> {
 
 export async function checkRunObjectStore(): Promise<void> {
   const adapter = getPlatformStorageAdapter();
-  await adapter.preflight();
+  await adapter.preflight({ requireOverwrite: true });
 }
 

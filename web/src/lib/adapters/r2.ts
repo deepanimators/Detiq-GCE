@@ -105,7 +105,7 @@ export class R2Adapter implements DurableStorageAdapter {
     }
   }
 
-  async preflight(): Promise<StoragePreflightResult> {
+  async preflight(options?: { requireOverwrite?: boolean }): Promise<StoragePreflightResult> {
     const key = `.detiq/preflight-${Date.now()}-${Math.random().toString(16).slice(2)}.txt`;
     try {
       await this.client.send(new HeadBucketCommand({ Bucket: this.bucket }));
@@ -115,13 +115,30 @@ export class R2Adapter implements DurableStorageAdapter {
         Body: Buffer.from('detiq-preflight'),
         ContentType: 'text/plain',
       }));
+      
+      if (options?.requireOverwrite) {
+        try {
+          await this.client.send(new PutObjectCommand({
+            Bucket: this.bucket,
+            Key: key,
+            Body: Buffer.from('detiq-preflight-overwrite'),
+            ContentType: 'text/plain',
+          }));
+        } catch (err: any) {
+          if (err.message?.includes('locked') || err.message?.includes('policy') || err.name === 'MethodNotAllowed' || err.$metadata?.httpStatusCode === 403 || err.$metadata?.httpStatusCode === 405) {
+            throw new Error('Bucket Object Lock (WORM) prevents overwriting files. Run state cannot be stored here.');
+          }
+          throw err;
+        }
+      }
+      
       await this.delete(key);
 
       return {
         adapter: this.name,
         writable: true,
         versioning: undefined,
-        message: 'R2 bucket is writable. Enable object versioning/retention in Cloudflare for compliance profiles.',
+        message: 'R2 bucket is writable and allows overwriting (no Object Lock).',
       };
     } catch (error) {
       return preflightFailure(this.name, error);
