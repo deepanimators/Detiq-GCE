@@ -180,7 +180,7 @@ async function executeRun(
   };
 
   let heartbeatInterval: ReturnType<typeof setInterval> | undefined;
-  let activeRenewLease: Promise<void> | null = null;
+  let activeRenewLease: Promise<unknown> | null = null;
 
   try {
     heartbeatInterval = setInterval(() => {
