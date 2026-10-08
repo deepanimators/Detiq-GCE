@@ -16,23 +16,27 @@ export async function POST(
     return Response.json({ run: stored.run });
   }
 
-  const active = requestRunCancellation(runId);
-  if (!active) {
+  try {
+    const active = requestRunCancellation(runId);
+    if (!active) {
+      const run = await store.updateRun(runId, {
+        status: 'cancelled',
+        completedAt: new Date().toISOString(),
+        errorCode: 'RunCancelled',
+        errorMessage: 'Run cancelled before worker start.',
+      });
+      await emitRunEvent(runId, 'run.cancelled', 'Run cancelled before worker start.');
+      return Response.json({ run });
+    }
+
     const run = await store.updateRun(runId, {
       status: 'cancelled',
-      completedAt: new Date().toISOString(),
-      errorCode: 'RunCancelled',
-      errorMessage: 'Run cancelled before worker start.',
+      errorCode: 'RunCancellationRequested',
+      errorMessage: 'Cancellation requested by operator.',
     });
-    await emitRunEvent(runId, 'run.cancelled', 'Run cancelled before worker start.');
+    await emitRunEvent(runId, 'run.cancel_requested', 'Cancellation requested by operator.');
     return Response.json({ run });
+  } catch (err: any) {
+    return Response.json({ error: err.message || 'Failed to cancel run', code: err.code }, { status: 500 });
   }
-
-  const run = await store.updateRun(runId, {
-    status: 'cancelled',
-    errorCode: 'RunCancellationRequested',
-    errorMessage: 'Cancellation requested by operator.',
-  });
-  await emitRunEvent(runId, 'run.cancel_requested', 'Cancellation requested by operator.');
-  return Response.json({ run });
 }

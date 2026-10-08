@@ -34,14 +34,22 @@ async function failStaleRunningRun(stored: StoredRun): Promise<StoredRun> {
 
   const store = getRunStore();
   const message = `Worker stopped reporting progress for ${Math.round(staleRunMs() / 1000)}s. The serverless worker likely exceeded the platform runtime limit before finishing.`;
-  await store.updateRun(stored.run.id, {
-    status: 'failed',
-    completedAt: new Date().toISOString(),
-    errorCode: 'WorkerStale',
-    errorMessage: message,
-  });
-  await emitRunEvent(stored.run.id, 'run.failed', message, { errorCode: 'WorkerStale' });
-  return await store.getRun(stored.run.id) ?? stored;
+  try {
+    await store.updateRun(stored.run.id, {
+      status: 'failed',
+      completedAt: new Date().toISOString(),
+      errorCode: 'WorkerStale',
+      errorMessage: message,
+    });
+    await emitRunEvent(stored.run.id, 'run.failed', message, { errorCode: 'WorkerStale' });
+    return await store.getRun(stored.run.id) ?? stored;
+  } catch (err: any) {
+    console.error(`[runs] Failed to persist stale state for ${stored.run.id}:`, err);
+    stored.run.status = 'failed';
+    stored.run.errorCode = 'WorkerStale';
+    stored.run.errorMessage = message;
+    return stored;
+  }
 }
 
 function latestEventTime(events: RunEvent[]): number | null {
