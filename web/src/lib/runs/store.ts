@@ -101,7 +101,13 @@ class ObjectRunStore implements RunStore {
 
   async getRun(runId: string): Promise<StoredRun | null> {
     const raw = await getRunObject(`runs/${safeRunId(runId)}.json`);
-    return raw ? JSON.parse(raw) as StoredRun : null;
+    if (!raw) return null;
+    try {
+      return JSON.parse(raw) as StoredRun;
+    } catch (error) {
+      console.error(`[store] Failed to parse run ${runId}:`, error);
+      return null;
+    }
   }
 
   async updateRun(runId: string, patch: RunUpdate): Promise<BackupRunRecord> {

@@ -532,6 +532,14 @@ export default function Home() {
       const pollRun = async () => {
         try {
           const response = await fetch(`/api/runs/${runId}`, { cache: 'no-store' });
+          if (response.status === 404) {
+            addLog('ERROR: Run not found or corrupted in storage. Discarding run.');
+            localStorage.removeItem(RUN_CACHE_STORAGE_KEY);
+            setCurrentRun(null);
+            setRunning(false);
+            if (pollTimer) clearInterval(pollTimer);
+            return;
+          }
           const body = await response.json() as { run?: RunRecord; events?: RunEventRecord[] };
           if (body.run) applyRun(body.run);
           body.events?.forEach(applyEvent);
