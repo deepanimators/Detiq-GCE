@@ -191,6 +191,8 @@ async function processRepo(args: {
   throwIfAborted(req.signal);
   onLog(`[start] ${label}`);
 
+  let selectiveApiArtifacts: any[] = [];
+
   if (req.captureMode === 'metadata-only') {
     onLog(`  Skipping code capture (metadata-only mode)`);
   } else if (req.captureMode === 'mirror' || !req.captureMode) {
@@ -239,6 +241,15 @@ async function processRepo(args: {
       progress.uploadedFolders = new Set(files.map((file) => folderKey(file.path)));
       onLog(`[done] ${label} (dry-run)`);
     } else {
+      selectiveApiArtifacts = files.map(file => ({
+        kind: 'file',
+        name: file.path.split('/').pop() || file.path,
+        path: file.path,
+        size: file.size,
+        sha256: file.sha, // git blob sha
+        destination: 'adapters',
+        verification_status: 'unverified'
+      }));
       const fileLimit = pLimit(fileConcurrency);
       let uploaded = 0;
       let fatalContentErrorMessage: string | null = null;
@@ -332,15 +343,7 @@ async function processRepo(args: {
       mode: req.captureMode || 'selective-api',
       repo: `${repo.owner}/${repo.name}`,
       extractedAt: new Date().toISOString(),
-      artifacts: summary.totalFiles > 0 ? {
-         // for selective-api we could list everything, but for now just the summary is enough or a pointer.
-         // the backlog says: "every artifact records kind, path, size, SHA-256, destination, and verification status"
-         // doing this for every file in selective-api could be huge. We can just list the mode and summary.
-         totalFiles: summary.totalFiles,
-         uploadedFiles: summary.uploadedFiles,
-         skippedFiles: summary.skippedFiles,
-         failedFiles: summary.failedFiles,
-      } : undefined
+      artifacts: req.captureMode === 'selective-api' ? selectiveApiArtifacts : undefined
     };
     const manifestBuffer = Buffer.from(JSON.stringify(manifest, null, 2));
     await Promise.all(adapters.map(async (a) => {

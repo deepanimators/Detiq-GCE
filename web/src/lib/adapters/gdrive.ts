@@ -26,6 +26,44 @@ export class GDriveAdapter implements DurableStorageAdapter {
     this.rootFolderId = cfg.rootFolderId;
   }
 
+  
+  async uploadStream(storagePath: string, stream: NodeJS.ReadableStream | AsyncIterable<Buffer>, contentType: string): Promise<{ size: number, sha256: string }> {
+    const { PassThrough } = require('stream');
+    const crypto = require('crypto');
+    const passThrough = new PassThrough();
+    let size = 0;
+    const hash = crypto.createHash('sha256');
+    
+    const pump = async () => {
+      for await (const chunk of stream) {
+        size += chunk.length;
+        hash.update(chunk as Buffer);
+        if (!passThrough.write(chunk)) {
+          await new Promise(r => passThrough.once('drain', r));
+        }
+      }
+      passThrough.end();
+    };
+
+    const parts = storagePath.split('/');
+    const fileName = parts.pop()!;
+    const parentId = await this._buildPath(parts, 0, this.rootFolderId, '');
+
+    const [res] = await Promise.all([
+      withRetry(
+        () => this.drive.files.create({
+          requestBody: { name: fileName, parents: [parentId] },
+          media: { mimeType: contentType, body: passThrough },
+          fields: 'id',
+        }),
+        { label: `gdrive uploadStream ${storagePath}` }
+      ),
+      pump()
+    ]);
+
+    return { size, sha256: hash.digest('hex') };
+  }
+
   async upload(storagePath: string, content: Buffer, contentType: string): Promise<void> {
     try {
       const parts = storagePath.split('/');

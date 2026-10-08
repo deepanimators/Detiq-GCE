@@ -1,6 +1,8 @@
 import { getRunStore } from '@/lib/runs/store';
 
 export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
+export const fetchCache = 'force-no-store';
 
 const TERMINAL_STATUSES = new Set(['preflight_failed', 'completed', 'partial', 'failed', 'cancelled']);
 const POLL_INTERVAL_MS = 1000;
@@ -56,9 +58,7 @@ export async function GET(
             send({ event, run: stored.run });
           }
 
-          if (TERMINAL_STATUSES.has(stored.run.status)) {
-            close();
-          }
+          // The client will close the connection when it receives the terminal status.
         } catch (error) {
           send({ error: error instanceof Error ? error.message : String(error) });
           close();

@@ -6,6 +6,8 @@ import type { RunEvent, StoredRun } from '@/lib/runs/types';
 
 export const runtime = 'nodejs';
 export const maxDuration = 300;
+export const dynamic = 'force-dynamic';
+export const fetchCache = 'force-no-store';
 
 const WORKER_NUDGE_COOLDOWN_MS = 60_000;
 const queuedWorkerNudges = new Map<string, number>();

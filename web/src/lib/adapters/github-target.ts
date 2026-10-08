@@ -23,6 +23,22 @@ export class GitHubTargetAdapter implements DurableStorageAdapter {
     this.branch = cfg.branch ?? 'main';
   }
 
+  
+  async uploadStream(storagePath: string, stream: NodeJS.ReadableStream | AsyncIterable<Buffer>, contentType: string): Promise<{ size: number, sha256: string }> {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    const crypto = require('crypto');
+    const hash = crypto.createHash('sha256');
+    for await (const chunk of stream) {
+      chunks.push(chunk as Buffer);
+      size += chunk.length;
+      hash.update(chunk as Buffer);
+    }
+    const content = Buffer.concat(chunks);
+    await this.upload(storagePath, content);
+    return { size, sha256: hash.digest('hex') };
+  }
+
   async upload(storagePath: string, content: Buffer): Promise<void> {
     try {
       const contentBase64 = content.toString('base64');

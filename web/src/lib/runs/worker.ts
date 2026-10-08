@@ -272,6 +272,10 @@ async function executeRun(
       `Run ${terminalStatus}: ${completedRepos}/${totalRepositories} repositories, ${summary.failedFiles} failed files in final slice.`,
       { durationMs: Date.now() - startedAt }
     );
+    const updatedRun = await store.getRun(runId);
+    if (updatedRun) {
+      await writeRunManifest(runId, updatedRun.run, adapters, emitLog);
+    }
     return { completed: true, remainingRepositories: [] };
   } catch (error) {
     const message = redactSecrets(error instanceof Error ? error.message : String(error));
@@ -291,6 +295,10 @@ async function executeRun(
       status === 'cancelled' ? 'Run cancelled by operator.' : message,
       { durationMs: Date.now() - startedAt, errorCode: timedOut ? 'WorkerTimeout' : status === 'cancelled' ? 'RunCancelled' : 'RunFailed' }
     );
+    const updatedRun = await store.getRun(runId);
+    if (updatedRun) {
+      await writeRunManifest(runId, updatedRun.run, adapters, emitLog);
+    }
     return { completed: true, remainingRepositories: [] };
   } finally {
     if (timeout) clearTimeout(timeout);
@@ -336,4 +344,41 @@ function getRetryAfterRateLimit(resetAt?: string): string | null {
   if (!Number.isFinite(resetMs) || resetMs <= Date.now()) return null;
   const bufferSeconds = positiveInteger(Number(process.env.GITHUB_RATE_LIMIT_RETRY_BUFFER_SECONDS ?? 30), 30);
   return new Date(resetMs + bufferSeconds * 1000).toISOString();
+}
+
+async function writeRunManifest(
+  runId: string, 
+  runRecord: import('@/lib/runs/types').BackupRunRecord, 
+  adapters: import('@/lib/adapters').StorageAdapter[], 
+  log: (msg: string) => void
+) {
+  const manifest = {
+    runId: runId,
+    targetType: runRecord.config.targetType,
+    targetName: runRecord.config.targetName,
+    captureMode: runRecord.config.options.captureMode || 'mirror',
+    status: runRecord.status,
+    createdAt: runRecord.createdAt,
+    completedAt: runRecord.completedAt,
+    repositoryOutcomes: {
+      completed: runRecord.completedRepos,
+      failed: runRecord.failedRepos,
+      partial: runRecord.partialRepos,
+      total: runRecord.discoveredRepos,
+    }
+  };
+  
+  const buffer = Buffer.from(JSON.stringify(manifest, null, 2));
+  const latestBuffer = Buffer.from(JSON.stringify({ runId, url: `${runRecord.config.targetName}/run-${runId}.json` }, null, 2));
+  
+  await Promise.all(adapters.map(async (adapter) => {
+    try {
+      if (adapter.upload) {
+        await adapter.upload(`${runRecord.config.targetName}/run-${runId}.json`, buffer, 'application/json');
+        await adapter.upload(`${runRecord.config.targetName}/latest.json`, latestBuffer, 'application/json');
+      }
+    } catch (e) {
+      log(`[warn] Failed to upload run manifest to ${adapter.name}: ${e}`);
+    }
+  }));
 }

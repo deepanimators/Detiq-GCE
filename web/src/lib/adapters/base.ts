@@ -1,7 +1,7 @@
 export interface StorageAdapter {
   readonly name: string;
   upload(storagePath: string, content: Buffer, contentType: string): Promise<void>;
-  uploadStream?(storagePath: string, stream: AsyncIterable<Buffer> | NodeJS.ReadableStream, contentType: string): Promise<{ size: number, sha256: string }>;
+  uploadStream(storagePath: string, stream: AsyncIterable<Buffer> | NodeJS.ReadableStream, contentType: string): Promise<{ size: number, sha256: string }>;
 }
 
 export type StorageErrorCategory =

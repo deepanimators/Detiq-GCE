@@ -1391,11 +1391,18 @@ export default function Home() {
             </p>
           )}
 
-          <Button onClick={startExtraction} disabled={running || Boolean(loadingBranches) || !canRun} className="w-full h-10">
-            {running
-              ? 'Run active...'
-              : `Create Backup Run${countAdapters() > 1 ? ` → ${countAdapters()} targets` : ''}${metadataEnabled ? ' + metadata' : ''}`}
-          </Button>
+          <div className="flex gap-2">
+            <Button onClick={startExtraction} disabled={running || Boolean(loadingBranches) || !canRun} className="flex-1 h-10">
+              {running
+                ? 'Run active...'
+                : `Create Backup Run${countAdapters() > 1 ? ` → ${countAdapters()} targets` : ''}${metadataEnabled ? ' + metadata' : ''}`}
+            </Button>
+            {running && currentRun && (
+              <Button onClick={cancelRun} variant="destructive" className="h-10">
+                Cancel
+              </Button>
+            )}
+          </div>
           <p className="text-[11px] text-zinc-400 px-1">
             Save controls are section-specific. Browser storage keeps only the sections you save.
           </p>
@@ -1415,9 +1422,6 @@ export default function Home() {
                   <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
                   {currentRun?.status ?? 'Queued'}
                 </span>
-              )}
-              {running && currentRun && (
-                <button onClick={cancelRun} className="text-xs text-red-500 hover:text-red-700">Cancel</button>
               )}
               {logs.length > 0 && (
                 <>
